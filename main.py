@@ -9,12 +9,6 @@ from astrbot.api.all import *
 from astrbot.api.star import Context, Star, register
 from astrbot.api import logger
 
-# 确保 AstrBot 版本兼容
-import astrbot
-if not hasattr(astrbot, 'version') or astrbot.version < '4.16':
-    raise ImportError("astrbot_plugin_Firefly_Blog_Manager 需要 AstrBot >= 4.16 版本")
-
-
 @register("astrbot_plugin_Firefly_Blog_Manager", "qiyueling2716", "博客远程管理插件", "1.0.0")
 class FireflyBlogManagerPlugin(Star):
     def __init__(self, context: Context, config: dict):
