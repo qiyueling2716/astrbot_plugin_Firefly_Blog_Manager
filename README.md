@@ -113,7 +113,7 @@ blog_root 博客根目录 /var/www/firefly
 
 ### 一键部署脚本
 ```
-curl -fsSL https://raw.githubusercontent.com/qiyueling2716/astrbot_plugin_Firefly_Blog_Manager/main/deploy-firefly.sh | bash
+curl -fsSL https://raw.githubusercontent.com/qiyueling2716/astrbot_plugin_Firefly_Blog_Manager/master/deploy-firefly.sh | bash
 ```
 
 
