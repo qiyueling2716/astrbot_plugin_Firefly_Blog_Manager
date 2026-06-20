@@ -1,9 +1,0 @@
-name: astrbot_plugin_Firefly_Blog_Manager
-display_name: 博客远程管理
-short_desc: 通过 AI 指令远程管理 Firefly 博客文章
-desc: 让 AstrBot 的 Agent 能够远程在 Firefly 博客上创建、删除、列出、更新文章。
-author: 月凌
-version: 1.0.0
-repo: https://github.com/qiyueling2716/astrbot_plugin_Firefly_Blog_Manager
-support_platforms: []
-astrbot_version: ">=4.16"
