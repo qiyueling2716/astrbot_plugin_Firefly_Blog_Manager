@@ -3,8 +3,11 @@ import re
 import paramiko
 from datetime import datetime
 from typing import Optional
+
 from astrbot.api.all import *
+from astrbot.api.tool import agent_tool
 from astrbot.api import logger
+
 
 @register("astrbot_plugin_Firefly_Blog_Manager", "qiyueling2716", "博客远程管理插件", "1.0.0")
 class FireflyBlogManagerPlugin(Star):
@@ -16,6 +19,7 @@ class FireflyBlogManagerPlugin(Star):
         
         if self.connection_type == "remote":
             self._connect_ssh()
+
 
     # ==================== SSH 相关方法 ====================
     def _connect_ssh(self) -> bool:
