@@ -2,7 +2,7 @@
 
 # ============================================================
 # Firefly 博客一键部署脚本
-# 适用于 Ubuntu/Debian 服务器
+# 适用于 Ubuntu/Debian 服务器 (兼容 systemd 和 SysV init)
 # 作者: qiyueling2716
 # 仓库: https://github.com/qiyueling2716/Firefly-Blog
 # ============================================================
@@ -18,7 +18,7 @@ NC='\033[0m' # No Color
 
 # 默认配置
 FIREFLY_REPO="https://github.com/qiyueling2716/Firefly-Blog.git"
-FIREFLY_BRANCH="main"  # 默认主分支，可根据需要修改
+FIREFLY_BRANCH="master"  # 改为 master
 BLOG_ROOT="/var/www/firefly"
 NGINX_SITE_NAME="firefly"
 DOMAIN=""
@@ -105,7 +105,7 @@ parse_args() {
                 echo "  --no-node               不安装 Node.js（已安装可跳过）"
                 echo "  --no-nginx              不安装 Nginx（已安装可跳过）"
                 echo "  --blog-root PATH        博客安装目录（默认 /var/www/firefly）"
-                echo "  -b, --branch BRANCH     指定克隆分支（默认 main）"
+                echo "  -b, --branch BRANCH     指定克隆分支（默认 master）"
                 echo "  -h, --help              显示此帮助信息"
                 echo ""
                 echo "示例:"
@@ -121,6 +121,20 @@ parse_args() {
     done
 }
 
+# 服务管理函数（兼容 systemd 和 SysV init）
+service_action() {
+    local action=$1
+    local service=$2
+    if command -v systemctl &> /dev/null && systemctl list-units &> /dev/null 2>&1; then
+        systemctl $action $service 2>/dev/null || return 1
+    elif [ -f "/etc/init.d/$service" ]; then
+        service $service $action 2>/dev/null || return 1
+    else
+        return 1
+    fi
+    return 0
+}
+
 install_packages() {
     print_info "更新软件包列表..."
     apt update -y
@@ -131,9 +145,14 @@ install_packages() {
     if [[ "$INSTALL_NGINX" == true ]]; then
         print_info "安装 Nginx..."
         apt install -y nginx
-        systemctl enable nginx
-        systemctl start nginx
-        print_success "Nginx 安装完成"
+        
+        print_info "尝试启动 Nginx..."
+        if service_action start nginx; then
+            print_success "Nginx 已启动"
+        else
+            print_warn "Nginx 安装完成但未能自动启动"
+            print_warn "请手动执行: service nginx start  或   /etc/init.d/nginx start"
+        fi
     fi
 
     if [[ "$INSTALL_NODE" == true ]]; then
@@ -164,7 +183,11 @@ clone_and_build() {
     print_info "创建博客目录并复制文件..."
     mkdir -p "$BLOG_ROOT"
     cp -r dist/* "$BLOG_ROOT/"
-    chown -R www-data:www-data "$BLOG_ROOT"
+    
+    # 尝试设置权限
+    if id "www-data" &>/dev/null; then
+        chown -R www-data:www-data "$BLOG_ROOT" 2>/dev/null || true
+    fi
 
     print_success "博客构建完成，文件已部署到 $BLOG_ROOT"
 }
@@ -172,6 +195,7 @@ clone_and_build() {
 configure_nginx() {
     print_info "配置 Nginx..."
 
+    # 生成 Nginx 配置
     if [[ -n "$DOMAIN" ]]; then
         if [[ "$AUTO_SSL" == true ]]; then
             if [[ -z "$EMAIL" ]]; then
@@ -225,8 +249,20 @@ EOF
         print_success "默认配置创建完成"
     fi
 
+    # 启用站点
     ln -sf /etc/nginx/sites-available/$NGINX_SITE_NAME /etc/nginx/sites-enabled/
-    nginx -t && systemctl reload nginx
+    
+    # 测试配置
+    print_info "测试 Nginx 配置..."
+    if nginx -t; then
+        print_info "重载 Nginx..."
+        if ! service_action reload nginx; then
+            print_warn "无法自动重载 Nginx，请手动执行: service nginx reload"
+        fi
+    else
+        print_error "Nginx 配置测试失败，请检查配置文件"
+        exit 1
+    fi
 
     print_success "Nginx 配置完成"
 }
