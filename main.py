@@ -5,7 +5,7 @@ from datetime import datetime
 from typing import Optional
 
 from astrbot.api.all import *
-from astrbot.api.tool import agent_tool
+from astrbot.api.tools import agent_tool  # 正确的导入路径
 from astrbot.api import logger
 
 
@@ -20,8 +20,7 @@ class FireflyBlogManagerPlugin(Star):
         if self.connection_type == "remote":
             self._connect_ssh()
 
-
-    # ==================== SSH 相关方法 ====================
+    # ==================== SSH 连接方法 ====================
     def _connect_ssh(self) -> bool:
         """建立 SSH 连接到远程服务器"""
         try:
@@ -195,7 +194,6 @@ class FireflyBlogManagerPlugin(Star):
                 return stdout.split('\n')
             return []
 
-    # ==================== Sanitize 工具方法 ====================
     def _sanitize_filename(self, title: str) -> str:
         """将标题转为安全的文件名"""
         safe = re.sub(r'[^\w\s-]', '', title)
