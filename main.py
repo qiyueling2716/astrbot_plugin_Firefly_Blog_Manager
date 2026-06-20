@@ -2,11 +2,8 @@ import os
 import re
 import paramiko
 from datetime import datetime
-from pathlib import Path
 from typing import Optional
-
 from astrbot.api.all import *
-from astrbot.api.star import Context, Star, register
 from astrbot.api import logger
 
 @register("astrbot_plugin_Firefly_Blog_Manager", "qiyueling2716", "博客远程管理插件", "1.0.0")
@@ -17,7 +14,6 @@ class FireflyBlogManagerPlugin(Star):
         self.ssh_client = None
         self.connection_type = config.get("connection_type", "local")
         
-        # 根据连接类型初始化
         if self.connection_type == "remote":
             self._connect_ssh()
 
