@@ -1,21 +1,6 @@
 # AstrBot Firefly Blog Manager
 
-让 AstrBot 的 AI Agent 通过自然语言指令管理你的 Firefly 博客。
-
-## 系统要求
-
-| 组件 | 最低版本 | 说明 |
-|------|----------|------|
-| AstrBot | >= 4.16 | 插件运行环境 |
-| Python | >= 3.10 | 插件依赖 |
-| Node.js | >= 22 | Firefly 博客构建需要 |
-| pnpm | 任意 | Firefly 依赖管理 |
-
-## 前置条件
-
-1. 已部署 [Firefly 博客](https://github.com/qiyueling2716/Firefly-Blog)，且博客根目录下包含 `package.json`
-2. AstrBot 已正常运行，且版本 >= 4.16
-3. 如果使用远程模式，目标服务器已配置 SSH 访问
+让 AstrBot 的 AI Agent 通过自然语言指令管理你的 [Firefly 博客](https://github.com/qiyueling2716/Firefly-Blog)。
 
 ## 它能做什么
 
@@ -41,6 +26,15 @@
 | 构建博客 | 执行 `pnpm build` 生成静态站点 |
 | 部署博客 | 把 `dist/` 部署到 Web 服务器 |
 | 一键构建部署 | 自动执行环境检查 -> 依赖安装 -> 构建 -> 部署 |
+
+## 系统要求
+
+| 组件 | 最低版本 | 说明 |
+|------|----------|------|
+| AstrBot | >= 4.16 | 插件运行环境 |
+| Python | >= 3.10 | 插件依赖 |
+| Node.js | >= 22 | Firefly 博客构建需要 |
+| pnpm | 任意 | Firefly 依赖管理 |
 
 ## 三种部署模式
 
@@ -78,94 +72,6 @@ pip install -r requirements.txt
 
 然后在 AstrBot WebUI 中重载插件。
 
-## 一键部署脚本
-
-插件目录下提供了 `deploy.sh`（Linux/macOS）和 `deploy.ps1`（Windows）脚本，用于在服务器上直接执行构建和部署，不依赖 AstrBot 运行环境。
-
-### 脚本功能
-
-- 检测 Python >= 3.10
-- 检测并自动安装 pip 依赖（asyncssh, pyyaml）
-- 检测 Node.js >= 22
-- 检测 pnpm
-- 验证 Firefly 项目结构
-- 自动执行 `pnpm install` 和 `pnpm build`
-- 根据部署模式执行对应部署操作
-
-### Linux / macOS
-
-1. 复制配置文件模板：
-   ```bash
-   cp deploy.conf.example deploy.conf
-   ```
-
-2. 编辑 `deploy.conf`，填写实际值：
-   ```bash
-   DEPLOY_MODE=local_only
-   LOCAL_BLOG_ROOT=/var/www/firefly
-   WEB_ROOT=/var/www/html
-   # 远程模式还需填写 SERVER_IP、USERNAME、AUTH_TYPE 等
-   ```
-
-3. 执行部署：
-   ```bash
-   chmod +x deploy.sh
-   ./deploy.sh
-   ```
-
-### Windows
-
-Windows 默认没有 Bash 环境，请使用 PowerShell 脚本：
-
-1. 复制配置文件模板：
-   ```powershell
-   Copy-Item deploy.conf.example deploy.conf
-   ```
-
-2. 编辑 `deploy.conf`，填写实际值：
-   ```powershell
-   DEPLOY_MODE=local_only
-   LOCAL_BLOG_ROOT=D:\www\firefly
-   WEB_ROOT=D:\www\html
-   # 远程模式还需填写 SERVER_IP、USERNAME、AUTH_TYPE 等
-   ```
-
-3. 执行部署：
-   ```powershell
-   # 推荐方式（避免编码问题）
-   powershell -File .\deploy.ps1
-
-   # 或者直接执行（如果执行策略允许）
-   .\deploy.ps1
-   ```
-
-### 通过环境变量覆盖配置
-
-不创建 `deploy.conf` 也可以直接传环境变量：
-
-```bash
-# Linux / macOS
-DEPLOY_MODE=local_build \
-  LOCAL_BLOG_ROOT=/var/www/firefly \
-  SERVER_IP=192.168.1.100 \
-  USERNAME=admin \
-  AUTH_TYPE=key \
-  PRIVATE_KEY_PATH=/home/admin/.ssh/id_ed25519 \
-  REMOTE_WEB_ROOT=/var/www/html \
-  ./deploy.sh
-```
-
-```powershell
-# Windows
-$env:DEPLOY_MODE="local_build"
-$env:LOCAL_BLOG_ROOT="D:\www\firefly"
-$env:SERVER_IP="192.168.1.100"
-$env:USERNAME="admin"
-$env:AUTH_TYPE="key"
-$env:REMOTE_WEB_ROOT="/var/www/html"
-.\deploy.ps1
-```
-
 ## 配置
 
 在 AstrBot WebUI -> 插件管理 -> Firefly 博客管理 -> 配置：
@@ -201,6 +107,78 @@ $env:REMOTE_WEB_ROOT="/var/www/html"
 ### 密码认证
 
 配置 `auth_type` 为 `password`，`password` 填 SSH 密码即可。
+
+## 一键部署脚本
+
+插件目录下提供了 `deploy.sh`（Linux/macOS）和 `deploy.ps1`（Windows）脚本，用于在服务器上直接执行构建和部署，不依赖 AstrBot 运行环境。
+
+### 脚本功能
+
+- 检测 Python >= 3.10（缺失时自动安装）
+- 检测并自动安装 pip 依赖（asyncssh, pyyaml）
+- 检测 Node.js >= 22（缺失时自动安装）
+- 检测 pnpm（缺失时自动安装）
+- 自动克隆 Firefly 博客仓库（支持镜像加速）
+- 自动执行 `pnpm install` 和 `pnpm build`
+- 根据部署模式执行对应部署操作
+
+### Linux / macOS
+
+```bash
+# 1. 复制配置文件模板
+cp deploy.conf.example deploy.conf
+
+# 2. 编辑 deploy.conf，填写实际值
+# DEPLOY_MODE=local_only
+# LOCAL_BLOG_ROOT=/var/www/firefly
+# WEB_ROOT=/var/www/html
+
+# 3. 执行部署
+chmod +x deploy.sh
+./deploy.sh
+```
+
+### Windows
+
+```powershell
+# 1. 复制配置文件模板
+Copy-Item deploy.conf.example deploy.conf
+
+# 2. 编辑 deploy.conf，填写实际值
+# DEPLOY_MODE=local_only
+# LOCAL_BLOG_ROOT=D:\www\firefly
+# WEB_ROOT=D:\www\html
+
+# 3. 执行部署
+powershell -File .\deploy.ps1
+```
+
+### 通过环境变量覆盖配置
+
+不创建 `deploy.conf` 也可以直接传环境变量：
+
+```bash
+# Linux / macOS
+DEPLOY_MODE=local_build \
+  LOCAL_BLOG_ROOT=/var/www/firefly \
+  SERVER_IP=192.168.1.100 \
+  USERNAME=admin \
+  AUTH_TYPE=key \
+  PRIVATE_KEY_PATH=/home/admin/.ssh/id_ed25519 \
+  REMOTE_WEB_ROOT=/var/www/html \
+  ./deploy.sh
+```
+
+```powershell
+# Windows
+$env:DEPLOY_MODE="local_build"
+$env:LOCAL_BLOG_ROOT="D:\www\firefly"
+$env:SERVER_IP="192.168.1.100"
+$env:USERNAME="admin"
+$env:AUTH_TYPE="key"
+$env:REMOTE_WEB_ROOT="/var/www/html"
+powershell -File .\deploy.ps1
+```
 
 ## 常见问题
 
