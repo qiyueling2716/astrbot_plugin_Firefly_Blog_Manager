@@ -76,11 +76,13 @@ pip install -r requirements.txt
 
 在 AstrBot WebUI -> 插件管理 -> Firefly 博客管理 -> 配置：
 
+### 配置项说明
+
 | 配置项 | 类型 | 说明 | 哪些模式需要 |
 |--------|------|------|-------------|
 | `deploy_mode` | 下拉 | `local_build` / `remote_build` / `local_only` | 全部 |
 | `local_blog_root` | 字符串 | 本地 Firefly 博客根目录（含 `package.json`） | `local_build`, `local_only` |
-| `web_root` | 字符串 | 本地 Web 服务器目录 | `local_only` |
+| `web_root` | 字符串 | 本地 Web 服务器根目录 | `local_only` |
 | `server_ip` | 字符串 | 远程服务器 IP | `local_build`, `remote_build` |
 | `server_port` | 整数 | SSH 端口，默认 22 | `local_build`, `remote_build` |
 | `username` | 字符串 | SSH 登录用户名 | `local_build`, `remote_build` |
@@ -88,7 +90,45 @@ pip install -r requirements.txt
 | `private_key_path` | 字符串 | 本地私钥文件绝对路径 | `key` 认证时 |
 | `password` | 字符串 | SSH 登录密码 | `password` 认证时 |
 | `remote_blog_root` | 字符串 | 远端服务器上 Firefly 博客根目录 | `remote_build` |
-| `remote_web_root` | 字符串 | 远端 Web 服务器目录 | `local_build`, `remote_build` |
+| `remote_web_root` | 字符串 | 远端 Web 服务器根目录 | `local_build`, `remote_build` |
+
+### 路径配置详解
+
+**`local_blog_root`** — Firefly 博客项目的根目录，必须包含 `package.json` 和 `src/content/posts/`。
+
+示例：
+- Linux: `/var/www/firefly`
+- Windows: `D:\www\firefly`
+
+**`web_root` / `remote_web_root`** — Web 服务器的根目录，不是博客目录。这是 Nginx/Apache/Caddy 配置的 `root` 路径，用户访问域名时看到的页面就来自这里。
+
+示例：
+- Nginx (Ubuntu): `/var/www/html`
+- Nginx (CentOS): `/usr/share/nginx/html`
+- Apache: `/var/www/html`
+- Caddy: 根据 `Caddyfile` 中的 `root` 配置
+
+**如何确认你的 web_root？**
+
+SSH 到服务器执行：
+```bash
+# Nginx
+grep -r "root" /etc/nginx/sites-enabled/ /etc/nginx/conf.d/ 2>/dev/null | head -5
+
+# Apache
+grep "DocumentRoot" /etc/apache2/sites-enabled/*.conf 2>/dev/null | head -5
+
+# 或者直接查找 index.html
+find /var /usr/share -name "index.html" 2>/dev/null
+```
+
+部署后，Web 服务器根目录下应该包含：
+```
+/var/www/html/
+├── index.html          <- 博客首页
+├── assets/             <- 静态资源
+└── posts/              <- 文章页面
+```
 
 ## SSH 认证配置
 
@@ -110,7 +150,16 @@ pip install -r requirements.txt
 
 ## 一键部署脚本
 
-插件目录下提供了 `deploy.sh`（Linux/macOS）和 `deploy.ps1`（Windows）脚本，用于在服务器上直接执行构建和部署，不依赖 AstrBot 运行环境。
+插件目录下提供了 `deploy.sh`（Linux/macOS）和 `deploy.ps1`（Windows）脚本。这些脚本**独立运行**，不依赖 AstrBot，适合在服务器上直接执行构建和部署。
+
+### 脚本与插件的区别
+
+| | 一键部署脚本 | AstrBot 插件 |
+|--|-------------|-------------|
+| 运行方式 | 命令行直接执行 | 通过 AstrBot WebUI 或 AI 对话触发 |
+| 依赖环境 | 不需要 AstrBot | 需要 AstrBot >= 4.16 |
+| 适用场景 | 服务器初始化、CI/CD | 日常文章管理、AI 对话控制 |
+| 功能范围 | 仅构建和部署 | 文章管理 + 构建部署 |
 
 ### 脚本功能
 
@@ -153,6 +202,37 @@ Copy-Item deploy.conf.example deploy.conf
 powershell -File .\deploy.ps1
 ```
 
+### deploy.conf 配置示例
+
+**单服务器部署（local_only）**
+```bash
+DEPLOY_MODE=local_only
+LOCAL_BLOG_ROOT=/var/www/firefly
+WEB_ROOT=/var/www/html
+```
+
+**本地构建 + 远程部署（local_build）**
+```bash
+DEPLOY_MODE=local_build
+LOCAL_BLOG_ROOT=/var/www/firefly
+SERVER_IP=192.168.1.100
+USERNAME=admin
+AUTH_TYPE=key
+PRIVATE_KEY_PATH=/home/admin/.ssh/id_ed25519
+REMOTE_WEB_ROOT=/var/www/html
+```
+
+**远程构建 + 远程部署（remote_build）**
+```bash
+DEPLOY_MODE=remote_build
+SERVER_IP=192.168.1.100
+USERNAME=admin
+AUTH_TYPE=key
+PRIVATE_KEY_PATH=/home/admin/.ssh/id_ed25519
+REMOTE_BLOG_ROOT=/var/www/firefly
+REMOTE_WEB_ROOT=/var/www/html
+```
+
 ### 通过环境变量覆盖配置
 
 不创建 `deploy.conf` 也可以直接传环境变量：
@@ -181,6 +261,35 @@ powershell -File .\deploy.ps1
 ```
 
 ## 常见问题
+
+**Q: `web_root` 和 `remote_web_root` 应该填什么路径？**
+
+填 Web 服务器的根目录，不是博客目录。这是 Nginx/Apache/Caddy 配置的 `root` 路径。
+
+常见值：
+- Nginx (Ubuntu/Debian): `/var/www/html`
+- Nginx (CentOS/RHEL): `/usr/share/nginx/html`
+- Apache: `/var/www/html`
+
+不确定的话，SSH 到服务器执行 `grep -r "root" /etc/nginx/sites-enabled/` 查看。
+
+**Q: `local_blog_root` 和 `web_root` 有什么区别？**
+
+- `local_blog_root` — Firefly 博客项目的根目录，包含 `package.json` 和 `src/content/posts/`，是构建的**源**
+- `web_root` — Web 服务器根目录，用户访问域名时看到的页面来自这里，是构建的**目标**
+
+示例：
+```
+/var/www/firefly/          <- local_blog_root
+├── package.json
+├── src/content/posts/
+└── dist/                  <- 构建产物
+
+/var/www/html/             <- web_root
+├── index.html             <- 从 dist/ 复制过来
+├── assets/
+└── posts/
+```
 
 **Q: 构建时内存不足怎么办？**
 
