@@ -1,25 +1,73 @@
-# AstrBot Firefly 博客远程管理插件
+# AstrBot Firefly Blog Manager
 
-让 AstrBot 的 Agent 能够通过自然语言指令远程管理 Firefly 博客的文章。
+让 AstrBot 的 AI Agent 通过自然语言指令管理你的 Firefly 博客。
 
-## ✨ 功能特性
+## 系统要求
 
-- 📝 **创建文章**：通过 AI 指令在远程博客上创建新文章
-- 🗑️ **删除文章**：通过 AI 指令删除指定的博客文章
-- 📋 **列出文章**：查看博客上所有文章的列表
-- 📄 **查看内容**：获取指定文章的完整 Markdown 内容
-- ✏️ **更新文章**：更新已有文章的内容或标题
+| 组件 | 最低版本 | 说明 |
+|------|----------|------|
+| AstrBot | >= 4.16 | 插件运行环境 |
+| Python | >= 3.10 | 插件依赖 |
+| Node.js | >= 22 | Firefly 博客构建需要 |
+| pnpm | 任意 | Firefly 依赖管理 |
 
-## 📦 安装
+## 前置条件
 
-### 方法一：通过 AstrBot WebUI 安装（推荐）
+1. 已部署 [Firefly 博客](https://github.com/qiyueling2716/Firefly-Blog)，且博客根目录下包含 `package.json`
+2. AstrBot 已正常运行，且版本 >= 4.16
+3. 如果使用远程模式，目标服务器已配置 SSH 访问
 
-1. 打开 AstrBot WebUI → 插件管理
+## 它能做什么
+
+这个插件把 Firefly 博客的日常操作封装成 AI 工具，Agent 可以直接调用，不需要你手动敲命令。
+
+### 文章管理
+
+| 操作 | 示例指令 |
+|------|----------|
+| 创建文章 | "帮我写一篇 Docker 入门，标题叫 Docker 快速入门" |
+| 删除文章 | "删除文章 Docker 快速入门" |
+| 列出文章 | "列出我的博客所有文章" |
+| 查看内容 | "查看 Docker 快速入门 的内容" |
+| 更新文章 | "把 Docker 快速入门 改成 Kubernetes 入门" |
+| 搜索文章 | "搜索包含 Docker 的文章" |
+
+### 构建与部署
+
+| 操作 | 说明 |
+|------|------|
+| 检查环境 | 检查 Node.js 和 pnpm 是否已安装 |
+| 安装依赖 | 执行 `pnpm install` |
+| 构建博客 | 执行 `pnpm build` 生成静态站点 |
+| 部署博客 | 把 `dist/` 部署到 Web 服务器 |
+| 一键构建部署 | 自动执行环境检查 -> 依赖安装 -> 构建 -> 部署 |
+
+## 三种部署模式
+
+插件支持三种模式，覆盖绝大多数部署场景：
+
+| 模式 | 构建位置 | 部署位置 | 适用场景 |
+|------|----------|----------|----------|
+| `local_build` | AstrBot 所在服务器 | 通过 SSH 推送到远端 | AstrBot 服务器性能好，远端只跑静态服务 |
+| `remote_build` | 通过 SSH 在远端服务器构建 | 远端服务器 | AstrBot 跑在轻量设备上（如树莓派），远端性能更好 |
+| `local_only` | AstrBot 所在服务器 | 同一台机器的本地目录 | 单服务器部署 |
+
+### 怎么选
+
+- **local_build**：AstrBot 在云服务器上，远端是低配 VPS 或静态托管
+- **remote_build**：AstrBot 在本地电脑/树莓派，远端是性能更好的服务器
+- **local_only**：博客和 AstrBot 装在同一台机器上
+
+## 安装
+
+### 通过 AstrBot WebUI（推荐）
+
+1. 打开 AstrBot WebUI -> 插件管理
 2. 点击「安装插件」
-3. 输入插件仓库地址：`https://github.com/qiyueling2716/astrbot_plugin_Firefly_Blog_Manager`
-4. 点击安装
+3. 输入仓库地址 `https://github.com/qiyueling2716/astrbot_plugin_Firefly_Blog_Manager`
+4. 点击安装，然后重载插件
 
-### 方法二：手动安装
+### 手动安装
 
 ```bash
 cd AstrBot/data/plugins
@@ -27,100 +75,183 @@ git clone https://github.com/qiyueling2716/astrbot_plugin_Firefly_Blog_Manager.g
 cd astrbot_plugin_Firefly_Blog_Manager
 pip install -r requirements.txt
 ```
+
 然后在 AstrBot WebUI 中重载插件。
-## ⚙️ 配置
 
-在 AstrBot WebUI → 插件管理 → 博客远程管理 → 配置，填写以下信息：
+## 一键部署脚本
 
-配置项 说明 示例
-server_ip 运行 Firefly 博客的服务器 IP 123.123.123.123
-server_port SSH 端口（默认 22） 22
-username SSH 登录用户名 root
-auth_type 认证方式：key（密钥）或 password（密码） key
-private_key_path 密钥认证时必填，私钥文件绝对路径 /root/.ssh/id_rsa
-password 密码认证时必填，SSH 登录密码 ********
-blog_root 博客根目录 /var/www/firefly
+插件目录下提供了 `deploy.sh`（Linux/macOS）和 `deploy.ps1`（Windows）脚本，用于在服务器上直接执行构建和部署，不依赖 AstrBot 运行环境。
 
-## 🔑 SSH 认证配置
+### 脚本功能
 
-### 方式一：密钥认证（推荐）
+- 检测 Python >= 3.10
+- 检测并自动安装 pip 依赖（asyncssh, pyyaml）
+- 检测 Node.js >= 22
+- 检测 pnpm
+- 验证 Firefly 项目结构
+- 自动执行 `pnpm install` 和 `pnpm build`
+- 根据部署模式执行对应部署操作
 
-1. 在 AstrBot 所在服务器生成 SSH 密钥（如已有可跳过）：
+### Linux / macOS
+
+1. 复制配置文件模板：
    ```bash
-   ssh-keygen -t rsa -b 4096 -C "astrbot-plugin"
+   cp deploy.conf.example deploy.conf
    ```
-2. 将公钥添加到旧服务器的 ~/.ssh/authorized_keys：
 
+2. 编辑 `deploy.conf`，填写实际值：
    ```bash
-   ssh-copy-id root@旧服务器IP
+   DEPLOY_MODE=local_only
+   LOCAL_BLOG_ROOT=/var/www/firefly
+   WEB_ROOT=/var/www/html
+   # 远程模式还需填写 SERVER_IP、USERNAME、AUTH_TYPE 等
    ```
-3. 在插件配置中选择 auth_type: key，填写 private_key_path
 
-### 方式二：密码认证
+3. 执行部署：
+   ```bash
+   chmod +x deploy.sh
+   ./deploy.sh
+   ```
 
-在插件配置中选择 auth_type: password，填写 password
+### Windows
 
-⚠️ 注意：密码认证存在安全风险，建议仅在测试环境使用，生产环境推荐使用密钥认证。
+Windows 默认没有 Bash 环境，请使用 PowerShell 脚本：
 
-## 🎯 使用示例
+1. 复制配置文件模板：
+   ```powershell
+   Copy-Item deploy.conf.example deploy.conf
+   ```
 
-在聊天中向 AstrBot 发送以下指令：
+2. 编辑 `deploy.conf`，填写实际值：
+   ```powershell
+   DEPLOY_MODE=local_only
+   LOCAL_BLOG_ROOT=D:\www\firefly
+   WEB_ROOT=D:\www\html
+   # 远程模式还需填写 SERVER_IP、USERNAME、AUTH_TYPE 等
+   ```
 
-创建文章
+3. 执行部署：
+   ```powershell
+   # 推荐方式（避免编码问题）
+   powershell -File .\deploy.ps1
 
-```
-帮我写一篇关于 Docker 部署的博客文章，标题是“Docker 快速入门”
-```
+   # 或者直接执行（如果执行策略允许）
+   .\deploy.ps1
+   ```
 
-删除文章
+### 通过环境变量覆盖配置
 
-```
-删除文章 Docker 快速入门
-```
+不创建 `deploy.conf` 也可以直接传环境变量：
 
-列出所有文章
-
-```
-列出我的博客所有文章
-```
-
-查看文章内容
-
-```
-查看 Docker 快速入门 这篇文章的内容
-```
-
-更新文章
-
-```
-把 Docker 快速入门 这篇文章的内容改成...
-```
-
-## 🔧 开发者信息
-
-· 作者: 月凌
-· 仓库: https://github.com/qiyueling2716/astrbot_plugin_Firefly_Blog_Manager
-· 许可证: MIT
-
-## 🛡️ 安全说明
-
-1. 支持 SSH 密钥和密码两种认证方式，推荐使用密钥认证
-2. 操作范围被限制在 blog_root/posts/ 目录下
-3. 建议通过 AstrBot 权限系统限制高危操作的使用者
-4. 所有操作均会记录在 AstrBot 日志中
-
-## 关于Firefly博客部署
-
-### 一键部署脚本
-```
-curl -fsSL https://raw.githubusercontent.com/qiyueling2716/astrbot_plugin_Firefly_Blog_Manager/master/deploy-firefly.sh | bash
+```bash
+# Linux / macOS
+DEPLOY_MODE=local_build \
+  LOCAL_BLOG_ROOT=/var/www/firefly \
+  SERVER_IP=192.168.1.100 \
+  USERNAME=admin \
+  AUTH_TYPE=key \
+  PRIVATE_KEY_PATH=/home/admin/.ssh/id_ed25519 \
+  REMOTE_WEB_ROOT=/var/www/html \
+  ./deploy.sh
 ```
 
+```powershell
+# Windows
+$env:DEPLOY_MODE="local_build"
+$env:LOCAL_BLOG_ROOT="D:\www\firefly"
+$env:SERVER_IP="192.168.1.100"
+$env:USERNAME="admin"
+$env:AUTH_TYPE="key"
+$env:REMOTE_WEB_ROOT="/var/www/html"
+.\deploy.ps1
+```
 
-## 🤝 贡献
+## 配置
 
-欢迎提交 Issue 和 Pull Request！
+在 AstrBot WebUI -> 插件管理 -> Firefly 博客管理 -> 配置：
 
-## 📄 许可证
+| 配置项 | 类型 | 说明 | 哪些模式需要 |
+|--------|------|------|-------------|
+| `deploy_mode` | 下拉 | `local_build` / `remote_build` / `local_only` | 全部 |
+| `local_blog_root` | 字符串 | 本地 Firefly 博客根目录（含 `package.json`） | `local_build`, `local_only` |
+| `web_root` | 字符串 | 本地 Web 服务器目录 | `local_only` |
+| `server_ip` | 字符串 | 远程服务器 IP | `local_build`, `remote_build` |
+| `server_port` | 整数 | SSH 端口，默认 22 | `local_build`, `remote_build` |
+| `username` | 字符串 | SSH 登录用户名 | `local_build`, `remote_build` |
+| `auth_type` | 下拉 | `key`（密钥）或 `password`（密码） | `local_build`, `remote_build` |
+| `private_key_path` | 字符串 | 本地私钥文件绝对路径 | `key` 认证时 |
+| `password` | 字符串 | SSH 登录密码 | `password` 认证时 |
+| `remote_blog_root` | 字符串 | 远端服务器上 Firefly 博客根目录 | `remote_build` |
+| `remote_web_root` | 字符串 | 远端 Web 服务器目录 | `local_build`, `remote_build` |
 
-MIT License
+## SSH 认证配置
+
+### 密钥认证（推荐）
+
+1. 生成密钥对：
+   ```bash
+   ssh-keygen -t ed25519 -C "astrbot-plugin"
+   ```
+2. 把公钥复制到服务器：
+   ```bash
+   ssh-copy-id -i ~/.ssh/id_ed25519.pub user@服务器IP
+   ```
+3. 配置 `auth_type` 为 `key`，`private_key_path` 填私钥路径
+
+### 密码认证
+
+配置 `auth_type` 为 `password`，`password` 填 SSH 密码即可。
+
+## 常见问题
+
+**Q: 构建时内存不足怎么办？**
+
+选 `remote_build` 模式，让远端服务器承担构建工作。
+
+**Q: pnpm 依赖没装怎么办？**
+
+插件会自动检测。如果 `node_modules` 不存在，执行构建时会提示你先运行 `install_blog_dependencies`。
+
+**Q: SSH 断联怎么办？**
+
+插件使用 asyncssh，自带 keepalive（30 秒间隔，最多 3 次重试）。如果连接断开，下次操作时会自动重连。
+
+**Q: 文章修改后网站没变化？**
+
+Firefly 是静态博客，修改文章后必须重新构建并部署才会生效。
+
+## 技术细节
+
+- 文章格式：完整支持 Firefly 的 YAML Front-matter
+- 远程操作：基于 asyncssh，异步非阻塞，带连接保活和自动重连
+- 元数据解析：PyYAML
+- 构建超时：10 分钟
+- 部署超时：5 分钟
+- 部署传输：优先 rsync，失败自动回退到 scp
+
+## 依赖
+
+- `asyncssh>=2.14.0` — 异步 SSH 连接
+- `pyyaml>=6.0` — YAML 解析与生成
+
+## 项目结构
+
+```
+astrbot_plugin_Firefly_Blog_Manager/
+├── main.py                 # 插件主文件（AstrBot 加载入口）
+├── metadata.yaml           # 插件元数据
+├── _conf_schema.json       # 插件配置定义（AstrBot WebUI 使用）
+├── requirements.txt        # Python 依赖
+├── deploy.sh               # Linux/macOS 一键部署脚本
+├── deploy.ps1              # Windows 一键部署脚本（PowerShell）
+├── deploy.conf.example     # 部署脚本配置模板
+├── CHANGELOG.md            # 版本变更记录
+├── README.md               # 本文档
+└── LICENSE                 # MIT 许可证
+```
+
+## 开发者
+
+- 作者：月凌
+- 仓库：https://github.com/qiyueling2716/astrbot_plugin_Firefly_Blog_Manager
+- 许可证：MIT

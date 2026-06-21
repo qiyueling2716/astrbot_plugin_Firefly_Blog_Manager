@@ -1,0 +1,31 @@
+# AstrBot Firefly Blog Manager - 部署脚本配置文件
+# 复制此文件为 deploy.conf 并填写实际值
+
+# 部署模式: local_only | local_build | remote_build
+DEPLOY_MODE=local_only
+
+# 本地 Firefly 博客根目录（包含 package.json 的目录）
+LOCAL_BLOG_ROOT=/var/www/firefly
+
+# local_only 模式: 本地 Web 服务器目录
+WEB_ROOT=/var/www/html
+
+# remote_build / local_build 模式: 远程服务器配置
+SERVER_IP=
+SERVER_PORT=22
+USERNAME=
+
+# 认证方式: key | password
+AUTH_TYPE=key
+
+# key 认证: 本地私钥路径
+PRIVATE_KEY_PATH=/home/user/.ssh/id_ed25519
+
+# password 认证: SSH 密码（仅当 AUTH_TYPE=password 时生效）
+PASSWORD=
+
+# remote_build 模式: 远端服务器上的博客根目录
+REMOTE_BLOG_ROOT=/var/www/firefly
+
+# local_build / remote_build 模式: 远端 Web 服务器目录
+REMOTE_WEB_ROOT=/var/www/html
