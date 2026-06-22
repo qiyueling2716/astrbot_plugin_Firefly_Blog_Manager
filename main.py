@@ -1,5 +1,5 @@
 """
-AstrBot Firefly 博客管理插件 v1.0
+AstrBot Firefly 博客管理插件 v1.1
 
 通过 AI 指令管理 Firefly 博客的文章和部署。
 支持三种部署模式：
@@ -93,9 +93,23 @@ class PostMetadata:
         """将元数据转换为 YAML Front-matter 格式"""
         data: dict = {
             "title": self.title,
-            "published": self.published,
-            "updated": self.updated,
         }
+        
+        # 日期字段特殊处理：转换为 date 对象以确保 YAML 输出为日期类型
+        from datetime import date
+        if self.published:
+            date_obj = self._parse_date(self.published)
+            if date_obj:
+                data["published"] = date_obj
+            else:
+                data["published"] = self.published
+        if self.updated:
+            date_obj = self._parse_date(self.updated)
+            if date_obj:
+                data["updated"] = date_obj
+            else:
+                data["updated"] = self.updated
+            
         if self.description:
             data["description"] = self.description
         if self.image:
@@ -127,8 +141,53 @@ class PostMetadata:
         if self.pinned:
             data["pinned"] = True
 
-        yaml_str = yaml.dump(data, allow_unicode=True, sort_keys=False, default_flow_style=False)
+        # 使用自定义日期表示器确保日期正确输出
+        yaml_str = self._safe_dump_with_dates(data)
         return f"---\n{yaml_str}---\n"
+
+    def _parse_date(self, date_str: str) -> date:
+        """解析日期字符串为 datetime.date 对象
+        
+        Args:
+            date_str: 日期字符串
+            
+        Returns:
+            datetime.date 对象，如果解析失败返回 None
+        """
+        from datetime import datetime
+        
+        # 尝试多种常见格式
+        formats = [
+            '%Y-%m-%d',      # 2024-01-01
+            '%Y/%m/%d',      # 2024/01/01
+            '%Y-%m-%d %H:%M:%S',  # 2024-01-01 12:00:00
+            '%Y/%m/%d %H:%M:%S',  # 2024/01/01 12:00:00
+            '%d-%m-%Y',      # 01-01-2024
+            '%d/%m/%Y',      # 01/01/2024
+        ]
+        
+        for fmt in formats:
+            try:
+                dt = datetime.strptime(date_str.strip(), fmt)
+                return dt.date()
+            except ValueError:
+                continue
+        
+        return None
+
+    def _safe_dump_with_dates(self, data: dict) -> str:
+        """安全地序列化数据，确保日期字段正确输出为日期类型"""
+        import yaml
+        
+        # 为 date 类型注册自定义表示器，确保日期正确输出为 YAML 日期格式
+        from datetime import date
+        
+        def date_representer(dumper, data):
+            return dumper.represent_scalar('tag:yaml.org,2002:timestamp', str(data))
+        
+        yaml.add_representer(date, date_representer)
+        
+        return yaml.safe_dump(data, allow_unicode=True, sort_keys=False, default_flow_style=False)
 
     @classmethod
     def from_content(cls, content: str) -> tuple[PostMetadata, str]:
