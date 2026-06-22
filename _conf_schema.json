@@ -49,7 +49,7 @@
   },
   "remote_web_root": {
     "type": "string",
-    "description": "远端 Web 服务器目录，构建产物将部署到这里",
-    "default": "/var/www/html"
+    "description": "远端 Web 服务器目录，构建产物将部署到这里。Firefly 博客通常部署在 /var/www/firefly",
+    "default": "/var/www/firefly"
   }
 }

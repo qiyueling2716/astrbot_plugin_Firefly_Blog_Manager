@@ -1,16 +1,67 @@
 # AstrBot Firefly Blog Manager - 部署脚本配置文件
+# =============================================================================
 # 复制此文件为 deploy.conf 并填写实际值
+# 部署脚本会自动配置 Nginx 或 Apache，并支持 SSL 证书
+# =============================================================================
 
-# 部署模式: local_only | local_build | remote_build
+# ----------------------------------------
+# 部署模式 (必填)
+# ----------------------------------------
+# 可选值: local_only | local_build | remote_build
+# local_only: 博客和 AstrBot 在同一台机器
+# local_build: 本地构建，SSH 部署到远端服务器
+# remote_build: 在远端服务器直接构建部署
 DEPLOY_MODE=local_only
 
-# 本地 Firefly 博客根目录（包含 package.json 的目录）
+# ----------------------------------------
+# 博客目录 (必填)
+# ----------------------------------------
+# Firefly 博客项目的根目录（包含 package.json）
 LOCAL_BLOG_ROOT=/var/www/firefly
 
-# local_only 模式: 本地 Web 服务器目录
-WEB_ROOT=/var/www/html
+# ----------------------------------------
+# 部署目录
+# ----------------------------------------
+# 构建产物部署到的目录（通常与博客目录相同）
+WEB_ROOT=/var/www/firefly
 
-# remote_build / local_build 模式: 远程服务器配置
+# ----------------------------------------
+# 域名配置 (可选，但推荐填写)
+# ----------------------------------------
+# 你的博客域名，用于自动配置 Web 服务器
+DOMAIN_NAME=blog.example.com
+
+# 是否启用 HTTPS (true/false)
+ENABLE_HTTPS=false
+
+# SSL 证书路径 (ENABLE_HTTPS=true 时必填)
+# 请填写你的 SSL 证书文件的绝对路径
+SSL_CERT_PATH=/etc/ssl/certs/your_domain.crt
+
+# SSL 证书密钥路径 (ENABLE_HTTPS=true 时必填)
+# 请填写你的 SSL 证书密钥文件的绝对路径
+SSL_CERT_KEY_PATH=/etc/ssl/private/your_domain.key
+
+# ----------------------------------------
+# Web 服务器配置 (可选)
+# ----------------------------------------
+# 可选值: nginx | apache | none
+# nginx: 使用 Nginx 作为 Web 服务器
+# apache: 使用 Apache 作为 Web 服务器
+# none: 不自动配置 Web 服务器，只复制文件
+WEB_SERVER=nginx
+
+# Nginx 配置模板路径 (可选，留空使用默认模板)
+# 如果你有自定义的 Nginx 配置模板，填入路径
+NGINX_CONFIG_TEMPLATE=
+
+# Apache 虚拟主机配置路径 (可选)
+# Apache 虚拟主机配置文件路径
+APACHE_VHOST_CONFIG=
+
+# ----------------------------------------
+# 远端服务器配置 (local_build/remote_build 模式)
+# ----------------------------------------
 SERVER_IP=
 SERVER_PORT=22
 USERNAME=
@@ -18,14 +69,38 @@ USERNAME=
 # 认证方式: key | password
 AUTH_TYPE=key
 
-# key 认证: 本地私钥路径
+# SSH 私钥路径 (AUTH_TYPE=key 时填写)
 PRIVATE_KEY_PATH=/home/user/.ssh/id_ed25519
 
-# password 认证: SSH 密码（仅当 AUTH_TYPE=password 时生效）
+# SSH 密码 (AUTH_TYPE=password 时填写)
 PASSWORD=
 
-# remote_build 模式: 远端服务器上的博客根目录
+# 远端博客目录 (remote_build 模式)
 REMOTE_BLOG_ROOT=/var/www/firefly
 
-# local_build / remote_build 模式: 远端 Web 服务器目录
-REMOTE_WEB_ROOT=/var/www/html
+# 远端部署目录
+REMOTE_WEB_ROOT=/var/www/firefly
+
+# ----------------------------------------
+# 高级选项
+# ----------------------------------------
+# GitHub 镜像 (国内用户可使用镜像加速克隆)
+# 可用镜像:
+#   https://hubproxy.jiaozi.live/https://github.com
+#   https://ghproxy.com/https://github.com
+GITHUB_MIRROR=
+
+# 是否自动备份旧版本 (true/false)
+AUTO_BACKUP=true
+
+# 备份保留天数
+BACKUP_RETENTION_DAYS=7
+
+# ----------------------------------------
+# 资源警告配置 (可选)
+# ----------------------------------------
+# CPU 使用率警告阈值 (百分比)，超过此值会显示警告
+RESOURCE_WARNING_CPU=80
+
+# 内存使用率警告阈值 (百分比)，超过此值会显示警告
+RESOURCE_WARNING_MEM=85

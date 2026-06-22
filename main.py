@@ -1,5 +1,5 @@
 """
-AstrBot Firefly 博客管理插件 v2.0
+AstrBot Firefly 博客管理插件 v1.0
 
 通过 AI 指令管理 Firefly 博客的文章和部署。
 支持三种部署模式：
@@ -814,6 +814,39 @@ class BuildDeployManager:
         self.web_root = config.get("web_root", "/var/www/html")
         self.remote_web_root = config.get("remote_web_root", "/var/www/html")
 
+    async def _is_firefly_blog(self, path: str) -> bool:
+        """检查路径是否为 Firefly 博客项目"""
+        if self.deploy_mode == DeployMode.REMOTE_BUILD and self.remote_executor:
+            package_json = posixpath.join(path, "package.json")
+            src_content = posixpath.join(path, "src", "content", "posts")
+            astro_config = posixpath.join(path, "astro.config.mjs")
+            
+            matches = 0
+            rc, _, _ = await self.remote_executor.run(f"test -f {package_json}", timeout=5)
+            if rc == 0:
+                matches += 1
+            rc, _, _ = await self.remote_executor.run(f"test -d {src_content}", timeout=5)
+            if rc == 0:
+                matches += 1
+            rc, _, _ = await self.remote_executor.run(f"test -f {astro_config}", timeout=5)
+            if rc == 0:
+                matches += 1
+            return matches >= 2
+        else:
+            if not os.path.isdir(path):
+                return False
+            package_json = os.path.join(path, "package.json")
+            src_content = os.path.join(path, "src", "content", "posts")
+            astro_config = os.path.join(path, "astro.config.mjs")
+            matches = 0
+            if os.path.isfile(package_json):
+                matches += 1
+            if os.path.isdir(src_content):
+                matches += 1
+            if os.path.isfile(astro_config):
+                matches += 1
+            return matches >= 2
+
     def _get_executor(self) -> CommandExecutor:
         """根据部署模式获取对应的命令执行器"""
         if self.deploy_mode == DeployMode.REMOTE_BUILD and self.remote_executor:
@@ -962,6 +995,32 @@ class BuildDeployManager:
             if parent_dir:
                 os.makedirs(parent_dir, exist_ok=True)
         
+        # 检查目标目录是否已存在且非空
+        dir_exists = False
+        if self.deploy_mode == DeployMode.REMOTE_BUILD:
+            rc, out, err = await executor.run(f"ls -la {blog_root}", timeout=10)
+            dir_exists = rc == 0
+        else:
+            dir_exists = os.path.isdir(blog_root)
+        
+        if dir_exists:
+            # 检查目录是否为空
+            is_empty = False
+            if self.deploy_mode == DeployMode.REMOTE_BUILD:
+                rc, out, err = await executor.run(f"ls -A {blog_root} | wc -l", timeout=10)
+                is_empty = rc == 0 and (out.strip() == "0" or not out.strip())
+            else:
+                is_empty = len(os.listdir(blog_root)) == 0
+            
+            if not is_empty:
+                # 目录已存在且非空，检查是否已经是 Firefly 博客
+                if await self._is_firefly_blog(blog_root):
+                    logger.info(f"[Build] 目标目录已存在且是 Firefly 博客，跳过克隆")
+                    return f"✅ 目标目录已存在且是 Firefly 博客: {blog_root}"
+                else:
+                    # 目录存在但不是 Firefly 博客，询问是否覆盖
+                    return f"❌ 目标目录已存在但不是 Firefly 博客\n目录: {blog_root}\n请手动清理该目录后重试，或在配置中指定其他路径"
+        
         # 尝试克隆仓库
         rc, out, err = await executor.run(f"git clone {repo_url} {blog_root}", timeout=120)
         if rc != 0:
@@ -1011,7 +1070,7 @@ class BuildDeployManager:
 
         local_dist = os.path.join(self.blog_root, "dist")
         if not os.path.exists(local_dist):
-            return False, "本地构建产物不存在，请先构建"
+            return False, f"本地构建产物不存在，请先构建\n预期路径: {local_dist}"
 
         hostname = self.config.get("server_ip", "")
         username = self.config.get("username", "")
@@ -1039,8 +1098,17 @@ class BuildDeployManager:
 
         rc, out, err = await self.local_executor.run(rsync_cmd, timeout=300)
         if rc != 0:
-            # rsync 失败，回退到 scp
-            logger.warning(f"rsync 失败，尝试 scp: {err}")
+            # rsync 失败，检查是否是本地路径问题
+            logger.warning(f"rsync 失败: {err}")
+            
+            # 检查本地 dist 目录内容
+            if os.path.exists(local_dist):
+                dist_contents = os.listdir(local_dist)
+                if not dist_contents:
+                    return False, f"本地构建产物目录为空: {local_dist}\n请重新执行构建"
+            
+            # 回退到 scp
+            logger.info("尝试使用 scp 部署")
             return await self._deploy_via_scp(local_dist, hostname, username, port, auth_type)
 
         return True, f"已部署到 {hostname}:{self.remote_web_root}"
@@ -1071,17 +1139,21 @@ class BuildDeployManager:
         return True, f"已通过 scp 部署到 {hostname}:{self.remote_web_root}"
 
     async def _deploy_remote(self):
-        """远端构建后直接复制 dist/ 到远端 web 目录"""
+        """远端构建后直接复制 dist/ 到远端 firefly 部署目录"""
         if not self.remote_executor:
             return False, "远程构建模式需要配置 SSH"
 
+        # Firefly 博客的部署目标是 remote_blog_root 下的 dist/ 目录
+        # 如果 remote_blog_root 是 /var/www/firefly，则部署到 /var/www/firefly
+        deploy_target = self.remote_blog_root
+
         rc, out, err = await self.remote_executor.run(
-            f"rm -rf {self.remote_web_root}/* && cp -r {self.remote_blog_root}/dist/* {self.remote_web_root}/",
+            f"rm -rf {deploy_target}/* && cp -r {self.remote_blog_root}/dist/* {deploy_target}/",
             timeout=60,
         )
         if rc != 0:
             return False, f"远端部署失败:\n{err}"
-        return True, f"已部署到远端 {self.remote_web_root}"
+        return True, f"已部署到远端 {deploy_target}"
 
     async def check_dependencies_installed(self) -> bool:
         """检查 node_modules 是否已安装"""
@@ -1223,17 +1295,24 @@ class FireflyBlogManager(Star):
             os.path.join(os.path.expanduser("~"), "firefly"),
             os.path.join(os.path.expanduser("~"), "blog"),
             os.path.join(os.path.expanduser("~"), "projects", "firefly"),
+            # 常见的 root 用户目录（大小写变体）
+            "/root/Firefly",
+            "/root/firefly",
+            "/root/blog",
         ]
 
-        # 搜索子目录
-        for base_path in ["/var/www", "/usr/share/nginx/html", "D:\\www", "C:\\www"]:
+        # 搜索子目录（包含大小写变体）
+        for base_path in ["/var/www", "/usr/share/nginx/html", "/root", "D:\\www", "C:\\www"]:
             if os.path.isdir(base_path):
                 for name in os.listdir(base_path):
                     full_path = os.path.join(base_path, name)
                     if os.path.isdir(full_path):
-                        search_paths.append(full_path)
+                        # 检查目录名是否包含 firefly 或 blog（大小写不敏感）
+                        name_lower = name.lower()
+                        if "firefly" in name_lower or "blog" in name_lower:
+                            search_paths.append(full_path)
 
-        # 检查路径是否包含 Firefly 博客特征文件
+        # 检查路径是否包含 Firefly 博客特征文件（大小写不敏感）
         for path in search_paths:
             if self._is_firefly_blog(path):
                 is_built = self._is_blog_built(path)

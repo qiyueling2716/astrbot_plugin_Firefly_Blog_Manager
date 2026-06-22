@@ -100,35 +100,35 @@ pip install -r requirements.txt
 - Linux: `/var/www/firefly`
 - Windows: `D:\www\firefly`
 
-**`web_root` / `remote_web_root`** — Web 服务器的根目录，不是博客目录。这是 Nginx/Apache/Caddy 配置的 `root` 路径，用户访问域名时看到的页面就来自这里。
+**`web_root` / `remote_web_root`** — Firefly 博客的部署目录（不是 Nginx 的网站根目录）。构建产物 `dist/` 会被复制到这个目录。
 
 示例：
-- Nginx (Ubuntu): `/var/www/html`
-- Nginx (CentOS): `/usr/share/nginx/html`
-- Apache: `/var/www/html`
-- Caddy: 根据 `Caddyfile` 中的 `root` 配置
+- Firefly 博客部署目录: `/var/www/firefly`
+- 注意：这是博客的实际部署位置，不是 Nginx 配置的 `root` 路径
 
-**如何确认你的 web_root？**
+**如何确认你的部署目录？**
 
 SSH 到服务器执行：
 ```bash
-# Nginx
+# 查看 Firefly 博客目录结构
+ls -la /var/www/firefly/
+
+# 查看 Nginx 配置的 root 路径
 grep -r "root" /etc/nginx/sites-enabled/ /etc/nginx/conf.d/ 2>/dev/null | head -5
 
-# Apache
-grep "DocumentRoot" /etc/apache2/sites-enabled/*.conf 2>/dev/null | head -5
-
-# 或者直接查找 index.html
-find /var /usr/share -name "index.html" 2>/dev/null
+# 如果 Nginx root 是 /var/www/html，检查是否是指向 firefly 的软链接或别名
+ls -la /var/www/html
 ```
 
-部署后，Web 服务器根目录下应该包含：
+部署后，部署目录下应该包含：
 ```
-/var/www/html/
+/var/www/firefly/
 ├── index.html          <- 博客首页
 ├── assets/             <- 静态资源
 └── posts/              <- 文章页面
 ```
+
+**重要**：确保 Nginx/Apache 配置的 `root` 路径指向这个部署目录，或者该目录本身就是 Web 服务器的根目录。
 
 ## SSH 认证配置
 
@@ -170,6 +170,11 @@ find /var /usr/share -name "index.html" 2>/dev/null
 - 自动克隆 Firefly 博客仓库（支持镜像加速）
 - 自动执行 `pnpm install` 和 `pnpm build`
 - 根据部署模式执行对应部署操作
+- **自动配置 Nginx 或 Apache Web 服务器**
+- **支持 SSL 证书配置（HTTPS）**
+- **资源监控警告（CPU/内存）**
+- **构建过程资源日志记录**
+- 自动备份旧版本
 
 ### Linux / macOS
 
@@ -245,7 +250,7 @@ DEPLOY_MODE=local_build \
   USERNAME=admin \
   AUTH_TYPE=key \
   PRIVATE_KEY_PATH=/home/admin/.ssh/id_ed25519 \
-  REMOTE_WEB_ROOT=/var/www/html \
+  REMOTE_WEB_ROOT=/var/www/firefly \
   ./deploy.sh
 ```
 
@@ -256,7 +261,7 @@ $env:LOCAL_BLOG_ROOT="D:\www\firefly"
 $env:SERVER_IP="192.168.1.100"
 $env:USERNAME="admin"
 $env:AUTH_TYPE="key"
-$env:REMOTE_WEB_ROOT="/var/www/html"
+$env:REMOTE_WEB_ROOT="D:\www\firefly"
 powershell -File .\deploy.ps1
 ```
 
@@ -264,28 +269,58 @@ powershell -File .\deploy.ps1
 
 **Q: `web_root` 和 `remote_web_root` 应该填什么路径？**
 
-填 Web 服务器的根目录，不是博客目录。这是 Nginx/Apache/Caddy 配置的 `root` 路径。
+填 Firefly 博客的部署目录，不是 Nginx 配置的网站根目录。
 
 常见值：
-- Nginx (Ubuntu/Debian): `/var/www/html`
-- Nginx (CentOS/RHEL): `/usr/share/nginx/html`
-- Apache: `/var/www/html`
+- Firefly 博客部署目录: `/var/www/firefly`
+- 注意：这是博客构建产物部署的位置，Nginx 的 `root` 应该指向这里
 
-不确定的话，SSH 到服务器执行 `grep -r "root" /etc/nginx/sites-enabled/` 查看。
+不确定的话，SSH 到服务器执行 `ls -la /var/www/firefly/` 查看。
+
+**Q: 如何启用 HTTPS？**
+
+1. 准备 SSL 证书文件（`.crt`）和密钥文件（`.key`）
+2. 在 `deploy.conf` 中配置：
+   ```bash
+   DOMAIN_NAME=blog.example.com
+   ENABLE_HTTPS=true
+   SSL_CERT_PATH=/etc/ssl/certs/your_cert.crt
+   SSL_CERT_KEY_PATH=/etc/ssl/private/your_key.key
+   WEB_SERVER=nginx
+   ```
+3. 脚本会自动配置 HTTPS 并将 HTTP 重定向到 HTTPS
+
+**Q: 如何选择 Nginx 或 Apache？**
+
+设置 `WEB_SERVER` 配置项：
+- `WEB_SERVER=nginx` — 使用 Nginx（默认）
+- `WEB_SERVER=apache` — 使用 Apache
+- `WEB_SERVER=none` — 不自动配置 Web 服务器
+
+**Q: 资源监控功能是什么？**
+
+部署脚本提供了资源监控功能，在安装依赖和构建前会检查系统资源使用情况：
+
+| 配置项 | 说明 | 默认值 |
+|--------|------|--------|
+| `RESOURCE_WARNING_CPU` | CPU 使用率警告阈值 | 80% |
+| `RESOURCE_WARNING_MEM` | 内存使用率警告阈值 | 85% |
+
+当资源使用率超过阈值时，脚本会显示警告并询问是否继续。构建过程中还会后台记录资源使用日志到 `build_resource_monitor.log`。
 
 **Q: `local_blog_root` 和 `web_root` 有什么区别？**
 
 - `local_blog_root` — Firefly 博客项目的根目录，包含 `package.json` 和 `src/content/posts/`，是构建的**源**
-- `web_root` — Web 服务器根目录，用户访问域名时看到的页面来自这里，是构建的**目标**
+- `web_root` — Firefly 博客部署目录，构建产物 `dist/` 会复制到这里
 
 示例：
 ```
-/var/www/firefly/          <- local_blog_root
+/var/www/firefly/          <- local_blog_root（博客源码目录）
 ├── package.json
 ├── src/content/posts/
 └── dist/                  <- 构建产物
 
-/var/www/html/             <- web_root
+/var/www/firefly/          <- web_root（部署目录，与源码目录相同）
 ├── index.html             <- 从 dist/ 复制过来
 ├── assets/
 └── posts/
