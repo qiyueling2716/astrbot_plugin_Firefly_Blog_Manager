@@ -23,7 +23,7 @@ $GithubMirrors = @(
 
 # Defaults (override via env vars)
 $DeployMode = if ($env:DEPLOY_MODE) { $env:DEPLOY_MODE } else { "local_only" }
-$LocalBlogRoot = if ($env:LOCAL_BLOG_ROOT) { $env:LOCAL_BLOG_ROOT } else { "D:\www\firefly" }
+$LocalBlogRoot = if ($env:LOCAL_BLOG_ROOT) { $env:LOCAL_BLOG_ROOT } else { $null }
 $WebRoot = if ($env:WEB_ROOT) { $env:WEB_ROOT } else { "D:\www\html" }
 $ServerIp = if ($env:SERVER_IP) { $env:SERVER_IP } else { "" }
 $ServerPort = if ($env:SERVER_PORT) { [int]$env:SERVER_PORT } else { 22 }
@@ -38,6 +38,61 @@ function Write-Info { param([string]$Message) Write-Host ("[INFO] " + $Message) 
 function Write-Ok { param([string]$Message) Write-Host ("[OK] " + $Message) -ForegroundColor Green }
 function Write-Warn { param([string]$Message) Write-Host ("[WARN] " + $Message) -ForegroundColor Yellow }
 function Write-Err { param([string]$Message) Write-Host ("[ERROR] " + $Message) -ForegroundColor Red }
+
+function Find-LocalBlogRoot {
+    param([string]$ConfiguredPath)
+    
+    # 如果已配置且存在，直接返回
+    if ($ConfiguredPath -and (Test-Path $ConfiguredPath)) {
+        return $ConfiguredPath
+    }
+
+    $searchPaths = @(
+        # 当前目录及子目录
+        Join-Path (Get-Location) "firefly"
+        Join-Path (Get-Location) "blog"
+        Get-Location
+        # 常见 Windows 路径
+        "D:\www\firefly"
+        "D:\www\blog"
+        "C:\www\firefly"
+        "C:\www\blog"
+        # 常见 Linux 路径（兼容 WSL）
+        "/var/www/firefly"
+        "/var/www/blog"
+        "/var/www/html/firefly"
+        "/usr/share/nginx/html/firefly"
+        # 用户目录
+        Join-Path $HOME "firefly"
+        Join-Path $HOME "blog"
+        Join-Path $HOME "projects" "firefly"
+    )
+
+    # 扫描常见 Web 目录下的子目录
+    foreach ($base in @("/var/www", "/usr/share/nginx/html", "D:\www", "C:\www")) {
+        if (Test-Path $base) {
+            Get-ChildItem $base -Directory | ForEach-Object {
+                $searchPaths += $_.FullName
+            }
+        }
+    }
+
+    # 检查路径是否包含 Firefly 特征
+    foreach ($path in $searchPaths) {
+        if (Test-Path $path) {
+            $packageJson = Join-Path $path "package.json"
+            $srcContent = Join-Path $path "src\content\posts"
+            
+            if ((Test-Path $packageJson) -or (Test-Path $srcContent)) {
+                Write-Info ("自动检测到博客目录: " + $path)
+                return $path
+            }
+        }
+    }
+
+    # 未找到，返回默认值
+    return "D:\www\firefly"
+}
 
 function Test-CommandExists {
     param([string]$Command)
@@ -456,6 +511,13 @@ if (Test-Path $configFile) {
             }
         }
     }
+}
+
+# 自动检测本地博客目录（仅 local_only 和 local_build 模式）
+if ($DeployMode -eq "local_only" -or $DeployMode -eq "local_build") {
+    $LocalBlogRoot = Find-LocalBlogRoot $LocalBlogRoot
+    Write-Host ("本地博客目录: " + $LocalBlogRoot)
+    Write-Host
 }
 
 Test-PythonEnv

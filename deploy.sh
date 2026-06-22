@@ -5,14 +5,15 @@ set -euo pipefail
 # AstrBot Firefly Blog Manager - 一键部署脚本
 # =============================================================================
 # 功能：
-#   1. 检测 Python 版本（>= 3.10）
-#   2. 检测并安装 pip 依赖（asyncssh, pyyaml）
-#   3. 检测 Node.js 版本（>= 22）
-#   4. 检测 pnpm
-#   5. 检测 Firefly 博客项目结构
-#   6. 安装博客依赖（pnpm install）
-#   7. 构建博客（pnpm build）
-#   8. 根据部署模式执行对应部署操作
+#   1. 自动检测本地已部署的 Firefly 博客目录
+#   2. 检测 Python 版本（>= 3.10）
+#   3. 检测并安装 pip 依赖（asyncssh, pyyaml）
+#   4. 检测 Node.js 版本（>= 22）
+#   5. 检测 pnpm
+#   6. 检测 Firefly 博客项目结构
+#   7. 安装博客依赖（pnpm install）
+#   8. 构建博客（pnpm build）
+#   9. 根据部署模式执行对应部署操作
 # =============================================================================
 
 RED='\033[0;31m'
@@ -34,7 +35,7 @@ GITHUB_MIRRORS=(
 
 # 默认配置（可通过环境变量覆盖）
 DEPLOY_MODE="${DEPLOY_MODE:-local_only}"
-LOCAL_BLOG_ROOT="${LOCAL_BLOG_ROOT:-/var/www/firefly}"
+LOCAL_BLOG_ROOT="${LOCAL_BLOG_ROOT:-}"
 WEB_ROOT="${WEB_ROOT:-/var/www/html}"
 SERVER_IP="${SERVER_IP:-}"
 SERVER_PORT="${SERVER_PORT:-22}"
@@ -59,6 +60,58 @@ log_ok() {
 
 log_warn() {
     echo -e "${YELLOW}[WARN]${NC} $1"
+}
+
+# -----------------------------------------------------------------------------
+# 自动检测本地博客目录
+# -----------------------------------------------------------------------------
+
+find_local_blog_root() {
+    # 如果已配置且存在，直接返回
+    if [[ -n "${LOCAL_BLOG_ROOT:-}" && -d "$LOCAL_BLOG_ROOT" ]]; then
+        echo "$LOCAL_BLOG_ROOT"
+        return
+    fi
+
+    local search_paths=(
+        # 当前目录及子目录
+        "$(pwd)/firefly"
+        "$(pwd)/blog"
+        "$(pwd)"
+        # 常见 Linux 路径
+        "/var/www/firefly"
+        "/var/www/blog"
+        "/var/www/html/firefly"
+        "/usr/share/nginx/html/firefly"
+        "/usr/share/nginx/html/blog"
+        # 用户目录
+        "$HOME/firefly"
+        "$HOME/blog"
+        "$HOME/projects/firefly"
+    )
+
+    # 扫描常见 Web 目录下的子目录
+    for base in /var/www /usr/share/nginx/html; do
+        if [[ -d "$base" ]]; then
+            for dir in "$base"/*/; do
+                [[ -d "$dir" ]] && search_paths+=("$dir")
+            done
+        fi
+    done
+
+    # 检查路径是否包含 Firefly 特征
+    for path in "${search_paths[@]}"; do
+        if [[ -d "$path" ]]; then
+            if [[ -f "$path/package.json" || -d "$path/src/content/posts" ]]; then
+                log_info "自动检测到博客目录: $path"
+                echo "$path"
+                return
+            fi
+        fi
+    done
+
+    # 未找到，返回默认值
+    echo "/var/www/firefly"
 }
 
 log_error() {
@@ -568,6 +621,13 @@ main() {
     echo ""
     echo "部署模式: $DEPLOY_MODE"
     echo ""
+
+    # 自动检测本地博客目录（仅 local_only 和 local_build 模式）
+    if [[ "$DEPLOY_MODE" == "local_only" || "$DEPLOY_MODE" == "local_build" ]]; then
+        LOCAL_BLOG_ROOT=$(find_local_blog_root)
+        echo "本地博客目录: $LOCAL_BLOG_ROOT"
+        echo ""
+    fi
 
     # 1. Python 环境
     check_python
