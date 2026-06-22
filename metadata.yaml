@@ -6,7 +6,7 @@ desc: |
   支持创建、删除、列出、查看、更新、搜索文章，以及环境检查、依赖安装、构建、部署等完整工作流。
   提供 local_build、remote_build、local_only 三种部署模式，适配本地、远端及混合部署场景。
 author: 月凌
-version: 1.0.0
+version: 1.1.0
 repo: https://github.com/qiyueling2716/astrbot_plugin_Firefly_Blog_Manager
 support_platforms: []
 astrbot_version: ">=4.16"
