@@ -1383,13 +1383,54 @@ class FireflyBlogManager(Star):
             return False
 
     def _get_user_id(self, event) -> Optional[str]:
-        """从事件对象中获取用户 ID"""
-        user_id = (
-            getattr(event, 'user_id', None) or
-            getattr(event, 'sender_id', None) or
-            getattr(event, 'from_id', None) or
-            getattr(event, 'user_id_holder', None)
-        )
+        """从事件对象中获取用户 ID
+        
+        支持多种事件对象类型，兼容不同平台适配器的用户 ID 字段命名：
+        - user_id: 标准字段
+        - sender_id: 发送者 ID
+        - from_id: 来源 ID
+        - user_id_holder: 用户 ID 持有者
+        - uid: 用户唯一标识
+        - sender: 发送者对象（可能包含 id 属性）
+        - from_user: 来源用户对象（可能包含 id 属性）
+        """
+        # 尝试直接获取用户 ID
+        user_id = getattr(event, 'user_id', None)
+        if user_id is None:
+            user_id = getattr(event, 'sender_id', None)
+        if user_id is None:
+            user_id = getattr(event, 'from_id', None)
+        if user_id is None:
+            user_id = getattr(event, 'user_id_holder', None)
+        if user_id is None:
+            user_id = getattr(event, 'uid', None)
+        
+        # 尝试从发送者对象获取
+        if user_id is None:
+            sender = getattr(event, 'sender', None)
+            if sender:
+                user_id = getattr(sender, 'id', None)
+        
+        # 尝试从来源用户对象获取
+        if user_id is None:
+            from_user = getattr(event, 'from_user', None)
+            if from_user:
+                user_id = getattr(from_user, 'id', None)
+        
+        # 尝试从消息链对象获取
+        if user_id is None:
+            message_chain = getattr(event, 'message_chain', None)
+            if message_chain:
+                # 遍历消息链寻找 At 元素或来源信息
+                try:
+                    for segment in message_chain:
+                        if hasattr(segment, 'type') and segment.type == 'At':
+                            user_id = getattr(segment, 'target', None)
+                            if user_id:
+                                break
+                except Exception:
+                    pass
+        
         if user_id is not None:
             return str(user_id)
         return None
@@ -1398,25 +1439,48 @@ class FireflyBlogManager(Star):
         """检查用户是否是 AstrBot 管理员（复用框架权限系统）
         
         优先使用框架提供的权限检查方法：
-        1. event.is_admin() - 框架标准方法
-        2. event.is_owner() - 检查是否是主人
+        1. event.is_admin(user_id) - 框架标准方法（需要传入 user_id）
+        2. event.is_owner(user_id) - 检查是否是主人（需要传入 user_id）
         3. context.is_admin(user_id) - 通过 context 检查
+        4. context.is_owner(user_id) - 通过 context 检查主人
         """
         user_id = self._get_user_id(event)
         if not user_id:
             return False
         
-        # 1. 优先使用 event 对象的权限检查方法
+        # 1. 优先使用 event 对象的权限检查方法（传入 user_id 参数）
         if hasattr(event, 'is_admin') and callable(event.is_admin):
             try:
-                return event.is_admin()
+                # 尝试带参数调用
+                result = event.is_admin(user_id)
+                if isinstance(result, bool):
+                    return result
+            except TypeError:
+                # 如果不接受参数，尝试无参调用
+                try:
+                    result = event.is_admin()
+                    if isinstance(result, bool):
+                        return result
+                except Exception:
+                    pass
             except Exception:
                 pass
         
-        # 2. 检查是否是主人
+        # 2. 检查是否是主人（传入 user_id 参数）
         if hasattr(event, 'is_owner') and callable(event.is_owner):
             try:
-                return event.is_owner()
+                # 尝试带参数调用
+                result = event.is_owner(user_id)
+                if isinstance(result, bool):
+                    return result
+            except TypeError:
+                # 如果不接受参数，尝试无参调用
+                try:
+                    result = event.is_owner()
+                    if isinstance(result, bool):
+                        return result
+                except Exception:
+                    pass
             except Exception:
                 pass
         
