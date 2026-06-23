@@ -76,5 +76,13 @@
     "type": "string",
     "description": "主人用户 ID。当需要验证主人权限时，只有此用户 ID 的用户可以使用受限工具。留空则使用 AstrBot 配置的主人 ID",
     "default": ""
+  },
+  "admin_users": {
+    "type": "list",
+    "items": {
+      "type": "string"
+    },
+    "description": "管理员用户 ID 列表。支持配置多个管理员，所有管理员都拥有主人级别的权限（包括构建、部署等危险操作）。优先级高于 owner_user_id",
+    "default": []
   }
 }

@@ -128,6 +128,7 @@ pip install -r requirements.txt
 | `allow_build_concurrent` | 布尔 | 是否允许并发构建，默认 false | 全部 |
 | `allow_only_owner` | 布尔 | 是否只允许主人使用非构建类工具，默认 false | 全部 |
 | `owner_user_id` | 字符串 | 主人用户 ID，留空则使用 AstrBot 配置的主人 ID | 全部 |
+| `admin_users` | 列表 | 管理员用户 ID 列表，支持多个管理员，优先级高于 owner_user_id | 全部 |
 
 ### 权限控制说明
 
@@ -149,7 +150,20 @@ owner_user_id: ""  # 使用 AstrBot 配置的主人 ID
 
 # 或者指定自定义主人 ID
 owner_user_id: "user123"
+
+# 或者配置多个管理员（推荐）
+admin_users:
+  - "user123"
+  - "user456"
+  - "user789"
 ```
+
+**管理员来源优先级**（从高到低）：
+
+1. 插件配置中的 `admin_users`（列表）
+2. 插件配置中的 `owner_user_id`（单个）
+3. AstrBot 全局配置中的 `owner_id`（单个）
+4. AstrBot 全局配置中的管理员列表
 
 ### 路径配置详解
 
