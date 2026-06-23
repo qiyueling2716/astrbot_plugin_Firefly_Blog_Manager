@@ -1,5 +1,5 @@
 """
-AstrBot Firefly 博客管理插件 v1.3.2
+AstrBot Firefly 博客管理插件 v1.3.3
 
 通过 AI 指令管理 Firefly 博客的文章和部署。
 支持三种部署模式：
@@ -343,6 +343,13 @@ class LocalExecutor(CommandExecutor):
         pass
 
 
+class ConnectionStatus(Enum):
+    """SSH 连接状态枚举"""
+    DISCONNECTED = "disconnected"
+    CONNECTING = "connecting"
+    CONNECTED = "connected"
+    ERROR = "error"
+
 class RemoteExecutor(CommandExecutor):
     """远程 SSH 命令执行器，使用 asyncssh 异步连接，按需建立，带保活和重连"""
 
@@ -353,24 +360,38 @@ class RemoteExecutor(CommandExecutor):
         self._lock = asyncio.Lock()
         self._connect_attempts = 0
         self._max_connect_attempts = 3
+        self._status = ConnectionStatus.DISCONNECTED
+        self._last_error = None
+
+    @property
+    def status(self) -> ConnectionStatus:
+        """获取当前连接状态"""
+        return self._status
 
     async def _ensure_connected(self, retry: int = 0):
         """确保 SSH 连接已建立（带锁防止并发连接竞争，支持重试）"""
         async with self._lock:
+            # 如果正在连接，等待完成
+            if self._status == ConnectionStatus.CONNECTING:
+                await asyncio.sleep(0.5)
+                return await self._ensure_connected(retry)
+
             # 如果已有连接，检查是否存活
-            if self._conn is not None:
+            if self._conn is not None and self._status == ConnectionStatus.CONNECTED:
                 try:
                     # 发送 keepalive 探测
                     await self._conn.run("echo ok", timeout=5)
                     return
-                except Exception:
-                    logger.warning("[SSH] 连接已断开，尝试重连")
+                except Exception as e:
+                    logger.warning(f"[SSH] 连接已断开，尝试重连: {e}")
                     self._conn = None
                     self._sftp = None
+                    self._status = ConnectionStatus.DISCONNECTED
 
             try:
                 import asyncssh
             except ImportError:
+                self._status = ConnectionStatus.ERROR
                 raise RuntimeError("远程模式需要 asyncssh 库，请安装: pip install asyncssh")
 
             hostname = self.config.get("server_ip", "")
@@ -379,8 +400,10 @@ class RemoteExecutor(CommandExecutor):
             auth_type = self.config.get("auth_type", "key")
 
             if not hostname:
+                self._status = ConnectionStatus.ERROR
                 raise ConfigurationError("缺少 server_ip 配置")
             if not username:
+                self._status = ConnectionStatus.ERROR
                 raise ConfigurationError("缺少 username 配置")
 
             connect_options: dict = {
@@ -396,6 +419,7 @@ class RemoteExecutor(CommandExecutor):
             if auth_type == "password":
                 password = self.config.get("password", "")
                 if not password:
+                    self._status = ConnectionStatus.ERROR
                     raise ConfigurationError("密码认证方式但未配置 password")
                 connect_options["password"] = password
                 logger.info(f"[SSH] 使用密码认证连接 {hostname}:{port}")
@@ -407,12 +431,16 @@ class RemoteExecutor(CommandExecutor):
                 else:
                     logger.warning(f"[SSH] 私钥文件不存在: {key_path}，尝试使用 SSH Agent")
 
+            self._status = ConnectionStatus.CONNECTING
             try:
                 self._conn = await asyncssh.connect(**connect_options)
                 self._connect_attempts = 0
+                self._status = ConnectionStatus.CONNECTED
+                self._last_error = None
                 logger.info(f"[SSH] 连接成功: {hostname}:{port}")
             except asyncssh.Error as e:
                 self._connect_attempts += 1
+                self._last_error = str(e)
                 logger.error(f"[SSH] 连接失败 (第 {self._connect_attempts} 次): {e}")
                 
                 if self._connect_attempts < self._max_connect_attempts:
@@ -421,6 +449,7 @@ class RemoteExecutor(CommandExecutor):
                     await asyncio.sleep(wait_time)
                     await self._ensure_connected(retry + 1)
                 else:
+                    self._status = ConnectionStatus.ERROR
                     raise SSHConnectionError(f"SSH 连接失败，已重试 {self._max_connect_attempts} 次: {e}")
 
     async def run(self, command: str, cwd: Optional[str] = None, timeout: int = 300) -> tuple[int, str, str]:
@@ -443,12 +472,15 @@ class RemoteExecutor(CommandExecutor):
                 return returncode, result.stdout or "", result.stderr or ""
             except asyncssh.TimeoutError:
                 logger.error(f"[RemoteExecutor] 命令执行超时: {command}")
+                # 超时不重置连接，可能是命令本身耗时太长
                 return -1, "", f"命令执行超时（{timeout}秒）"
             except asyncssh.Error as e:
                 logger.error(f"[RemoteExecutor] SSH 错误: {command}, 错误: {e}")
-                # 重置连接，下次自动重连
+                # 重置连接状态，下次自动重连
                 self._conn = None
                 self._sftp = None
+                self._status = ConnectionStatus.DISCONNECTED
+                self._last_error = str(e)
                 return -1, "", str(e)
         except SSHConnectionError as e:
             return -1, "", str(e)
@@ -459,24 +491,42 @@ class RemoteExecutor(CommandExecutor):
         """获取 SFTP 客户端（复用已有连接）"""
         await self._ensure_connected()
         if self._sftp is None:
-            self._sftp = await self._conn.start_sftp_client()
+            try:
+                self._sftp = await self._conn.start_sftp_client()
+            except Exception as e:
+                logger.error(f"[SSH] 创建 SFTP 客户端失败: {e}")
+                raise
         return self._sftp
 
     async def close(self):
+        """关闭 SSH 连接并清理资源"""
         async with self._lock:
             if self._sftp:
                 try:
                     self._sftp.exit()
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.warning(f"[SSH] 关闭 SFTP 客户端失败: {e}")
                 self._sftp = None
+            
             if self._conn:
                 try:
                     self._conn.close()
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.warning(f"[SSH] 关闭连接失败: {e}")
                 self._conn = None
-                logger.info("[SSH] 连接已关闭")
+            
+            self._status = ConnectionStatus.DISCONNECTED
+            self._last_error = None
+            logger.info("[SSH] 连接已关闭")
+
+    def reset_connection(self):
+        """主动重置连接状态（用于手动重连）"""
+        self._conn = None
+        self._sftp = None
+        self._status = ConnectionStatus.DISCONNECTED
+        self._connect_attempts = 0
+        self._last_error = None
+        logger.info("[SSH] 连接状态已重置")
 
 
 # ============================================================================
@@ -728,11 +778,11 @@ class BlogManager:
 
     def _make_path(self, filename: str) -> str:
         """构建文章完整路径"""
-        return posixpath.join(self.posts_dir, filename)
+        return os.path.join(self.posts_dir, filename)
 
     async def list_posts(self) -> list[PostInfo]:
         """列出所有文章，返回文章信息列表"""
-        pattern = posixpath.join(self.posts_dir, "*.md")
+        pattern = os.path.join(self.posts_dir, "*.md")
         files = await self.fs.list_files(pattern)
         posts = []
         for filepath in files:
@@ -781,11 +831,28 @@ class BuildDeployManager:
         self.config = config
         self.local_executor = local_executor
         self.remote_executor = remote_executor
-        self.deploy_mode = DeployMode(config.get("deploy_mode", "local_build"))
-        self.blog_root = config.get("local_blog_root", "/var/www/firefly")
-        self.remote_blog_root = config.get("remote_blog_root", "/var/www/firefly")
-        self.web_root = config.get("web_root", "/var/www/html")
-        self.remote_web_root = config.get("remote_web_root", "/var/www/html")
+        
+        # 校验部署模式配置
+        deploy_mode_value = config.get("deploy_mode", "local_build")
+        if deploy_mode_value not in [m.value for m in DeployMode]:
+            logger.warning(f"[BuildDeployManager] 无效的部署模式: {deploy_mode_value}，使用默认值 local_build")
+            deploy_mode_value = "local_build"
+        self.deploy_mode = DeployMode(deploy_mode_value)
+        
+        # 校验路径配置
+        self.blog_root = self._validate_path(config.get("local_blog_root", "/var/www/firefly"), "local_blog_root")
+        self.remote_blog_root = self._validate_path(config.get("remote_blog_root", "/var/www/firefly"), "remote_blog_root")
+        self.web_root = self._validate_path(config.get("web_root", "/var/www/html"), "web_root")
+        self.remote_web_root = self._validate_path(config.get("remote_web_root", "/var/www/html"), "remote_web_root")
+        
+        logger.info(f"[BuildDeployManager] 初始化完成 - 部署模式: {self.deploy_mode.value}")
+
+    def _validate_path(self, path: str, config_name: str) -> str:
+        """校验路径配置的有效性"""
+        if not isinstance(path, str) or not path.strip():
+            logger.warning(f"[BuildDeployManager] {config_name} 配置无效，使用默认路径")
+            return "/var/www/firefly" if "blog" in config_name else "/var/www/html"
+        return path.strip()
 
     async def _is_firefly_blog(self, path: str) -> bool:
         """检查路径是否为 Firefly 博客项目"""
@@ -1206,7 +1273,16 @@ def require_permission(force_owner: bool = False):
             if not ok:
                 yield msg
                 return
-            async for result in func(self, event, *args, **kwargs):
+            
+            result = func(self, event, *args, **kwargs)
+            # 兼容同步返回值、异步生成器和同步生成器
+            if hasattr(result, '__aiter__'):
+                async for item in result:
+                    yield item
+            elif hasattr(result, '__iter__'):
+                for item in result:
+                    yield item
+            elif result is not None:
                 yield result
         return wrapper
     return decorator
@@ -1218,7 +1294,16 @@ def require_blog_manager(func):
         if not self.blog_manager:
             yield "[ERROR] 博客管理器未初始化"
             return
-        async for result in func(self, event, *args, **kwargs):
+        
+        result = func(self, event, *args, **kwargs)
+        # 兼容同步返回值、异步生成器和同步生成器
+        if hasattr(result, '__aiter__'):
+            async for item in result:
+                yield item
+        elif hasattr(result, '__iter__'):
+            for item in result:
+                yield item
+        elif result is not None:
             yield result
     return wrapper
 
@@ -1229,7 +1314,16 @@ def require_build_manager(func):
         if not self.build_manager:
             yield "[ERROR] 构建管理器未初始化"
             return
-        async for result in func(self, event, *args, **kwargs):
+        
+        result = func(self, event, *args, **kwargs)
+        # 兼容同步返回值、异步生成器和同步生成器
+        if hasattr(result, '__aiter__'):
+            async for item in result:
+                yield item
+        elif hasattr(result, '__iter__'):
+            for item in result:
+                yield item
+        elif result is not None:
             yield result
     return wrapper
 
@@ -1241,7 +1335,7 @@ def require_build_manager(func):
     "astrbot_plugin_Firefly_Blog_Manager",
     "月凌",
     "通过 AI 指令管理 Firefly 博客文章和部署",
-    "1.3.1",
+    "1.3.3",
     "https://github.com/qiyueling2716/astrbot_plugin_Firefly_Blog_Manager",
 )
 class FireflyBlogManager(Star):
@@ -1353,13 +1447,13 @@ class FireflyBlogManager(Star):
             admin_ids.add(str(owner_user_id))
         
         # 3. AstrBot 全局配置中的 owner_id（单个）
-        if hasattr(self.context.config, 'owner_id'):
+        if hasattr(self.context, 'config') and hasattr(self.context.config, 'owner_id'):
             global_owner = self.context.config.owner_id
             if global_owner:
                 admin_ids.add(str(global_owner))
         
         # 4. 尝试从 AstrBot 全局配置获取管理员列表
-        if hasattr(self.context.config, 'admin_users') and self.context.config.admin_users:
+        if hasattr(self.context, 'config') and hasattr(self.context.config, 'admin_users') and self.context.config.admin_users:
             for uid in self.context.config.admin_users:
                 if uid:
                     admin_ids.add(str(uid))
@@ -1396,12 +1490,17 @@ class FireflyBlogManager(Star):
         """检查系统资源是否足以构建博客"""
         # 检查磁盘空间（至少需要 500MB）
         try:
-            # Windows 兼容：使用当前盘符或根目录
-            disk_path = os.path.abspath(os.sep) if os.name == 'nt' else "/"
+            # 跨平台磁盘路径选择
+            disk_path = self._get_disk_path_for_check()
             disk_usage = shutil.disk_usage(disk_path)
             free_space_gb = disk_usage.free / (1024 ** 3)
             if free_space_gb < 0.5:
                 return False, f"磁盘空间不足，仅剩余 {free_space_gb:.2f} GB，建议至少 500MB"
+            logger.info(f"[Firefly] 磁盘空间检查通过: {free_space_gb:.2f} GB 可用")
+        except PermissionError:
+            logger.warning(f"[Firefly] 磁盘空间检查权限不足")
+        except FileNotFoundError:
+            logger.warning(f"[Firefly] 磁盘路径不存在")
         except Exception as e:
             logger.warning(f"[Firefly] 磁盘空间检查失败: {e}")
         
@@ -1417,9 +1516,32 @@ class FireflyBlogManager(Star):
             if available_mb < memory_threshold:
                 return False, f"内存不足，仅剩余 {available_mb:.2f} MB（总内存 {total_mb:.0f} MB，使用率 {used_percent:.1f}%）。构建 Firefly 博客需要约 1.5GB 内存，建议设置 build_memory_threshold 为更低的值，或使用 remote_build 模式让远端服务器承担构建工作。"
             
+            logger.info(f"[Firefly] 内存检查通过: {available_mb:.2f} MB 可用")
             return True, f"资源充足。可用内存: {available_mb:.2f} MB（总内存 {total_mb:.0f} MB，使用率 {used_percent:.1f}%）"
         except ImportError:
+            logger.warning("[Firefly] psutil 未安装，跳过内存检查")
             return True, "资源检查：psutil 未安装，跳过内存检查"
+        except Exception as e:
+            logger.error(f"[Firefly] 内存检查失败: {e}")
+            return True, f"资源检查：内存检查失败 ({e})，继续执行"
+
+    def _get_disk_path_for_check(self) -> str:
+        """获取用于磁盘空间检查的路径（跨平台兼容）"""
+        # 优先使用博客目录所在磁盘
+        blog_root = self.config.get("local_blog_root", "")
+        if blog_root and os.path.isdir(blog_root):
+            drive, _ = os.path.splitdrive(blog_root)
+            if drive:
+                return drive + os.sep if os.name == 'nt' else blog_root
+        
+        # 回退到系统默认路径
+        if os.name == 'nt':
+            # Windows: 尝试获取系统盘
+            return os.path.join(os.environ.get('SYSTEMDRIVE', 'C:'), os.sep)
+        else:
+            # Unix-like: 使用根目录
+            return "/"
+
     
     def _check_memory_status(self) -> tuple[bool, str]:
         """检查当前内存状态，返回详细信息"""
@@ -1604,8 +1726,10 @@ class FireflyBlogManager(Star):
 
         '''
         filename = FilenameUtil.resolve(title)
+        logger.info(f"[Firefly] 尝试创建文章: {title} (文件: {filename})")
 
         if await self.blog_manager.exists(filename):
+            logger.warning(f"[Firefly] 文章已存在: {title}")
             yield f"[ERROR] 文章《{title}》已存在"
             return
 
@@ -1631,8 +1755,10 @@ class FireflyBlogManager(Star):
         full_content = self._build_post_content(title, content, tag_list, **extra)
 
         if await self.blog_manager.write_post(filename, full_content):
+            logger.info(f"[Firefly] 文章创建成功: {title}")
             yield f"[OK] 文章《{title}》创建成功\n提示：创建文章后需要重新构建部署才能生效"
         else:
+            logger.error(f"[Firefly] 文章创建失败: {title}")
             yield f"[ERROR] 创建文章《{title}》失败"
 
     @filter.llm_tool(name="delete_blog_post")
@@ -2307,7 +2433,6 @@ class FireflyBlogManager(Star):
             yield event.plain_result(self._format_post_list(results))
 
     @filter.command("博客环境", alias=["检查环境"], priority=5)
-    @filter.permission_type(filter.PermissionType.ADMIN)
     @require_permission(force_owner=True)
     @require_build_manager
     async def cmd_check_env(self, event):
@@ -2317,7 +2442,6 @@ class FireflyBlogManager(Star):
         yield event.plain_result(f"{prefix} {msg}")
 
     @filter.command("博客构建", alias=["构建博客"], priority=10)
-    @filter.permission_type(filter.PermissionType.ADMIN)
     @require_permission(force_owner=True)
     @require_build_manager
     async def cmd_build_blog(self, event):
@@ -2327,7 +2451,6 @@ class FireflyBlogManager(Star):
         yield event.plain_result(f"{prefix} {msg}")
 
     @filter.command("博客部署", alias=["部署博客"], priority=10)
-    @filter.permission_type(filter.PermissionType.ADMIN)
     @require_permission(force_owner=True)
     @require_build_manager
     async def cmd_deploy_blog(self, event):
@@ -2337,7 +2460,6 @@ class FireflyBlogManager(Star):
         yield event.plain_result(f"{prefix} {msg}")
 
     @filter.command("博客投稿列表", alias=["投稿列表", "待审核投稿"], priority=5)
-    @filter.permission_type(filter.PermissionType.ADMIN)
     @require_permission(force_owner=True)
     async def cmd_list_submissions(self, event):
         """查看投稿列表（仅管理员可用）"""

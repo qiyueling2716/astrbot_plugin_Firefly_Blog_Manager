@@ -2,6 +2,26 @@
 
 所有显著变更都会记录在此文件。
 
+## [1.3.3] - 2026-06-23
+
+### 修复
+
+- **Context.config 属性兼容**：修复新版 AstrBot 框架中 `Context` 对象不再提供 `config` 属性的问题，添加 `hasattr` 检查防止 `AttributeError`
+- **装饰器异步兼容性**：修复装饰器不兼容同步返回值的问题，支持异步生成器、同步生成器和单个返回值三种形式
+- **SSH 连接状态管理**：增强 `RemoteExecutor` 类，添加 `ConnectionStatus` 枚举、连接状态维护、并发连接保护和 `reset_connection()` 方法
+- **权限检查冗余移除**：移除重复的 `@filter.permission_type(filter.PermissionType.ADMIN)` 装饰器，统一使用自定义的 `@require_permission()` 装饰器
+- **路径处理一致性**：将 `BlogManager` 中的 `posixpath` 改为 `os.path`，提高跨平台兼容性
+- **配置参数校验**：在 `BuildDeployManager.__init__` 中添加部署模式和路径配置的校验逻辑
+- **资源检查可移植性**：改进 `_check_system_resources` 方法，添加跨平台磁盘路径选择和更完善的异常处理
+
+### 改进
+
+- **日志记录增强**：在文章创建等关键操作中添加详细日志记录，便于问题排查
+- **SSH 连接错误处理**：增强连接失败时的状态管理和清理逻辑
+- **配置校验增强**：添加 `_validate_path()` 方法校验路径配置的有效性
+
+---
+
 ## [1.3.2] - 2026-06-23
 
 ### 新增
