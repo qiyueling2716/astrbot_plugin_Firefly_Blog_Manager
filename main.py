@@ -178,16 +178,15 @@ class PostMetadata:
     def _safe_dump_with_dates(self, data: dict) -> str:
         """安全地序列化数据，确保日期字段正确输出为日期类型"""
         import yaml
-        
-        # 为 date 类型注册自定义表示器，确保日期正确输出为 YAML 日期格式
         from datetime import date
         
-        def date_representer(dumper, data):
-            return dumper.represent_scalar('tag:yaml.org,2002:timestamp', str(data))
+        class DateDumper(yaml.Dumper):
+            def represent_data(self, data):
+                if isinstance(data, date):
+                    return self.represent_scalar('tag:yaml.org,2002:timestamp', str(data))
+                return super().represent_data(data)
         
-        yaml.add_representer(date, date_representer)
-        
-        return yaml.safe_dump(data, allow_unicode=True, sort_keys=False, default_flow_style=False)
+        return yaml.dump(data, allow_unicode=True, sort_keys=False, default_flow_style=False, Dumper=DateDumper)
 
     @classmethod
     def from_content(cls, content: str) -> tuple[PostMetadata, str]:
@@ -1256,7 +1255,7 @@ class FilenameUtil:
     "astrbot_plugin_Firefly_Blog_Manager",
     "月凌",
     "通过 AI 指令管理 Firefly 博客文章和部署",
-    "2.0.0",
+    "1.3.0",
     "https://github.com/qiyueling2716/astrbot_plugin_Firefly_Blog_Manager",
 )
 class FireflyBlogManager(Star):
@@ -1275,6 +1274,39 @@ class FireflyBlogManager(Star):
         self.blog_manager: Optional[BlogManager] = None
         self.build_manager: Optional[BuildDeployManager] = None
         self._init_components()
+        self._submissions_cache = {}
+
+    def _check_permission(self, event, force_owner: bool = False) -> tuple[bool, str]:
+        """检查用户是否有权限使用插件
+        
+        Args:
+            event: 事件对象，包含用户信息
+            force_owner: 是否强制要求主人权限（构建等危险操作使用）
+        
+        返回: (是否有权限, 错误消息或空字符串)
+        """
+        allow_only_owner = self.config.get("allow_only_owner", False)
+        
+        if force_owner or allow_only_owner:
+            owner_user_id = self.config.get("owner_user_id", "")
+            if not owner_user_id:
+                owner_user_id = self.context.config.owner_id
+            
+            if not owner_user_id:
+                if force_owner:
+                    return False, "❌ 构建操作需要主人权限，但未配置主人用户 ID"
+                return True, ""
+            
+            user_id = getattr(event, 'user_id', None)
+            if not user_id:
+                return False, "❌ 无法获取用户 ID，无法验证权限"
+            
+            if user_id != owner_user_id:
+                if force_owner:
+                    return False, f"❌ 构建操作仅允许主人使用。当前用户 ID: {user_id}"
+                return False, f"❌ 权限不足：此插件仅允许主人使用。当前用户 ID: {user_id}"
+        
+        return True, ""
 
     def _is_firefly_blog(self, path: str) -> bool:
         """检查路径是否为 Firefly 博客项目"""
@@ -1310,17 +1342,36 @@ class FireflyBlogManager(Star):
         if free_space_gb < 0.5:
             return False, f"磁盘空间不足，仅剩余 {free_space_gb:.2f} GB，建议至少 500MB"
         
-        # 检查内存（至少需要 512MB）
+        # 检查内存（使用配置的阈值，默认 1536MB = 1.5GB）
+        memory_threshold = self.config.get("build_memory_threshold", 1536)
         try:
             import psutil
             mem = psutil.virtual_memory()
             available_mb = mem.available / (1024 ** 2)
-            if available_mb < 512:
-                return False, f"内存不足，仅剩余 {available_mb:.2f} MB，建议至少 512MB"
+            total_mb = mem.total / (1024 ** 2)
+            used_percent = mem.percent
+            
+            if available_mb < memory_threshold:
+                return False, f"内存不足，仅剩余 {available_mb:.2f} MB（总内存 {total_mb:.0f} MB，使用率 {used_percent:.1f}%）。构建 Firefly 博客需要约 1.5GB 内存，建议设置 build_memory_threshold 为更低的值，或使用 remote_build 模式让远端服务器承担构建工作。"
+            
+            return True, f"资源充足。可用内存: {available_mb:.2f} MB（总内存 {total_mb:.0f} MB，使用率 {used_percent:.1f}%）"
         except ImportError:
-            pass  # psutil 不是必须的
-        
-        return True, "资源充足"
+            return True, "资源检查：psutil 未安装，跳过内存检查"
+    
+    def _check_memory_status(self) -> tuple[bool, str]:
+        """检查当前内存状态，返回详细信息"""
+        try:
+            import psutil
+            mem = psutil.virtual_memory()
+            available_mb = mem.available / (1024 ** 2)
+            total_mb = mem.total / (1024 ** 2)
+            used_percent = mem.percent
+            memory_threshold = self.config.get("build_memory_threshold", 1536)
+            
+            status = "✅" if available_mb >= memory_threshold else "⚠️"
+            return True, f"{status} 当前内存状态：\n- 总内存: {total_mb:.0f} MB\n- 可用内存: {available_mb:.2f} MB\n- 使用率: {used_percent:.1f}%\n- 构建阈值: {memory_threshold} MB\n- 是否满足构建条件: {'是' if available_mb >= memory_threshold else '否'}"
+        except ImportError:
+            return False, "❌ psutil 未安装，无法检查内存状态。请安装 psutil: pip install psutil"
 
     def _find_local_blog_root(self) -> tuple[str, bool, bool]:
         """智能查找本地已部署的 Firefly 博客目录
@@ -1487,7 +1538,13 @@ class FireflyBlogManager(Star):
             image(string): 文章封面图片路径
             author(string): 文章作者
             comment(boolean): 是否启用评论功能，默认启用
+
         '''
+        ok, msg = self._check_permission(event)
+        if not ok:
+            yield msg
+            return
+
         if not self.blog_manager:
             yield "❌ 博客管理器未初始化"
             return
@@ -1531,6 +1588,11 @@ class FireflyBlogManager(Star):
         Args:
             title(string): 文章标题或文件名
         '''
+        ok, msg = self._check_permission(event)
+        if not ok:
+            yield msg
+            return
+
         if not self.blog_manager:
             yield "❌ 博客管理器未初始化"
             return
@@ -1549,6 +1611,11 @@ class FireflyBlogManager(Star):
     @filter.llm_tool(name="list_blog_posts")
     async def list_posts(self, event):
         '''列出 Firefly 博客上的所有文章。'''
+        ok, msg = self._check_permission(event)
+        if not ok:
+            yield msg
+            return
+
         if not self.blog_manager:
             yield "❌ 博客管理器未初始化"
             return
@@ -1563,6 +1630,11 @@ class FireflyBlogManager(Star):
         Args:
             title(string): 文章标题或文件名
         '''
+        ok, msg = self._check_permission(event)
+        if not ok:
+            yield msg
+            return
+
         if not self.blog_manager:
             yield "❌ 博客管理器未初始化"
             return
@@ -1611,6 +1683,11 @@ class FireflyBlogManager(Star):
             author(string): 文章作者，为空则不修改
             comment(boolean): 是否启用评论功能，为None则不修改
         '''
+        ok, msg = self._check_permission(event)
+        if not ok:
+            yield msg
+            return
+
         if not self.blog_manager:
             yield "❌ 博客管理器未初始化"
             return
@@ -1702,6 +1779,11 @@ class FireflyBlogManager(Star):
         Args:
             keyword(string): 搜索关键词
         '''
+        ok, msg = self._check_permission(event)
+        if not ok:
+            yield msg
+            return
+
         if not self.blog_manager:
             yield "❌ 博客管理器未初始化"
             return
@@ -1728,6 +1810,11 @@ class FireflyBlogManager(Star):
     @filter.llm_tool(name="check_blog_environment")
     async def check_environment(self, event):
         '''检查 Firefly 博客的构建环境是否就绪（Node.js 和 pnpm）。'''
+        ok, msg = self._check_permission(event)
+        if not ok:
+            yield msg
+            return
+
         if not self.build_manager:
             yield "❌ 构建管理器未初始化"
             return
@@ -1740,7 +1827,12 @@ class FireflyBlogManager(Star):
 
     @filter.llm_tool(name="install_blog_dependencies")
     async def install_dependencies(self, event):
-        '''安装 Firefly 博客的依赖（执行 pnpm install）。'''
+        '''安装 Firefly 博客的依赖（执行 pnpm install）。需要主人权限。'''
+        ok, msg = self._check_permission(event, force_owner=True)
+        if not ok:
+            yield msg
+            return
+
         if not self.build_manager:
             yield "❌ 构建管理器未初始化"
             return
@@ -1753,7 +1845,12 @@ class FireflyBlogManager(Star):
 
     @filter.llm_tool(name="build_blog")
     async def build_blog(self, event):
-        '''构建 Firefly 博客（执行 pnpm build）。构建可能需要较长时间。'''
+        '''构建 Firefly 博客（执行 pnpm build）。构建可能需要较长时间，占用约 1.5GB 内存。需要主人权限。'''
+        ok, msg = self._check_permission(event, force_owner=True)
+        if not ok:
+            yield msg
+            return
+
         if not self.build_manager:
             yield "❌ 构建管理器未初始化"
             return
@@ -1769,15 +1866,82 @@ class FireflyBlogManager(Star):
             yield "⚠️ 依赖未安装，请先执行 install_blog_dependencies。"
             return
 
+        # 检查内存是否满足构建条件
+        ok, msg = self._check_system_resources()
+        if not ok:
+            yield f"❌ {msg}"
+            return
+
+        yield f"📊 {msg}"
+
         ok, msg = await self.build_manager.build()
         if ok:
             yield f"✅ {msg}\n构建产物位于 dist/ 目录。"
         else:
             yield f"❌ {msg}"
 
+    @filter.llm_tool(name="check_memory_status")
+    async def check_memory_status(self, event):
+        '''检查当前系统内存状态，判断是否满足构建条件。
+        
+        返回当前总内存、可用内存、使用率以及是否满足构建阈值。
+        '''
+        ok, msg = self._check_permission(event)
+        if not ok:
+            yield msg
+            return
+
+        ok, msg = self._check_memory_status()
+        if ok:
+            yield msg
+        else:
+            yield msg
+
+    @filter.llm_tool(name="check_build_resource")
+    async def check_build_resource(self, event):
+        '''检查构建博客所需的资源是否充足（磁盘空间和内存）。
+        
+        构建 Firefly 博客需要约 1.5GB 内存和 500MB 磁盘空间。
+        '''
+        ok, msg = self._check_permission(event)
+        if not ok:
+            yield msg
+            return
+
+        ok, msg = self._check_system_resources()
+        if ok:
+            yield f"✅ {msg}"
+        else:
+            yield f"❌ {msg}"
+
+    @filter.llm_tool(name="get_build_config")
+    async def get_build_config(self, event):
+        '''获取当前构建相关的配置信息，包括内存阈值、内存限制和并发设置。'''
+        ok, msg = self._check_permission(event)
+        if not ok:
+            yield msg
+            return
+
+        memory_threshold = self.config.get("build_memory_threshold", 1536)
+        memory_limit = self.config.get("build_memory_limit", 0)
+        allow_concurrent = self.config.get("allow_build_concurrent", False)
+        
+        config_info = f"📋 当前构建配置：\n"
+        config_info += f"- build_memory_threshold: {memory_threshold} MB（可用内存低于此值时跳过构建）\n"
+        config_info += f"- build_memory_limit: {'不限制' if memory_limit == 0 else f'{memory_limit} MB'}\n"
+        config_info += f"- allow_build_concurrent: {'允许并发构建' if allow_concurrent else '不允许并发构建'}\n"
+        config_info += f"\n💡 提示：构建 Firefly 博客约需 1.5GB 内存，建议将 build_memory_threshold 设置为 1536 或更高。"
+        
+        yield config_info
+
     @filter.llm_tool(name="deploy_blog")
     async def deploy_blog(self, event):
-        '''部署 Firefly 博客到 Web 服务器。将构建产物部署到配置的 Web 根目录。'''
+        '''部署 Firefly 博客到 Web 服务器。将构建产物部署到配置的 Web 根目录。需要主人权限。'''
+        ok, msg = self._check_permission(event, force_owner=True)
+        if not ok:
+            yield msg
+            return
+
         if not self.build_manager:
             yield "❌ 构建管理器未初始化"
             return
@@ -1795,7 +1959,12 @@ class FireflyBlogManager(Star):
         2. 检查是否已构建
         3. 如果未找到仓库，自动克隆到默认目录
         4. 如果找到但未构建，检查资源后自动构建
-        5. 更新配置文件'''
+        5. 更新配置文件。需要主人权限。'''
+        ok, msg = self._check_permission(event, force_owner=True)
+        if not ok:
+            yield msg
+            return
+
         deploy_mode = DeployMode(self.config.get("deploy_mode", "local_build"))
         
         if deploy_mode not in (DeployMode.LOCAL_BUILD, DeployMode.LOCAL_ONLY):
@@ -1907,7 +2076,12 @@ class FireflyBlogManager(Star):
 
     @filter.llm_tool(name="build_and_deploy_blog")
     async def build_and_deploy(self, event):
-        '''一键构建并部署 Firefly 博客。自动执行：检查环境 -> 安装依赖 -> 构建 -> 部署。'''
+        '''一键构建并部署 Firefly 博客。自动执行：检查环境 -> 安装依赖 -> 构建 -> 部署。需要主人权限。'''
+        ok, msg = self._check_permission(event, force_owner=True)
+        if not ok:
+            yield msg
+            return
+
         if not self.build_manager:
             yield "❌ 构建管理器未初始化"
             return
@@ -1944,6 +2118,212 @@ class FireflyBlogManager(Star):
         results.append(f"✅ 部署: {msg}")
 
         yield "\n".join(results)
+
+    # ========================================================================
+    # 投稿管理 LLM 工具
+    # ========================================================================
+
+    @filter.llm_tool(name="submit_post_draft")
+    async def submit_post_draft(
+        self,
+        event,
+        title: str,
+        content: str,
+        author_name: str = "",
+        author_email: str = "",
+        tags: str = "",
+        category: str = "",
+        description: str = "",
+    ):
+        '''提交一篇文章草稿到博客。投稿不会立即发布，需要主人审核后才能发布。
+        
+        任何人都可以使用此功能提交投稿，无需权限验证。
+        
+        Args:
+            title(string): 文章标题
+            content(string): 文章正文内容（Markdown 格式）
+            author_name(string): 作者姓名
+            author_email(string): 作者邮箱
+            tags(string): 文章标签，多个标签用逗号分隔
+            category(string): 文章分类
+            description(string): 文章描述/摘要
+        '''
+        import uuid
+        import datetime
+        
+        submission_id = str(uuid.uuid4())[:8]
+        submit_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        
+        user_id = getattr(event, 'user_id', None)
+        
+        submission = {
+            "id": submission_id,
+            "title": title,
+            "content": content,
+            "author_name": author_name,
+            "author_email": author_email,
+            "tags": tags,
+            "category": category,
+            "description": description,
+            "submit_time": submit_time,
+            "user_id": user_id,
+            "status": "pending",
+        }
+        
+        self._submissions_cache[submission_id] = submission
+        
+        yield f"📝 投稿成功！\n\n投稿 ID: {submission_id}\n标题: {title}\n作者: {author_name or '匿名'}\n提交时间: {submit_time}\n\n您的投稿已保存，等待主人审核。主人审核通过后，文章将正式发布到博客。"
+
+    @filter.llm_tool(name="list_post_submissions")
+    async def list_post_submissions(self, event):
+        '''列出所有待审核的文章投稿。需要主人权限。'''
+        ok, msg = self._check_permission(event, force_owner=True)
+        if not ok:
+            yield msg
+            return
+
+        if not self._submissions_cache:
+            yield "📭 暂无待审核的投稿。"
+            return
+
+        submissions = sorted(
+            self._submissions_cache.values(),
+            key=lambda x: x["submit_time"],
+            reverse=True
+        )
+
+        result = "📋 待审核投稿列表：\n\n"
+        for sub in submissions:
+            status_icon = {
+                "pending": "⏳",
+                "approved": "✅",
+                "rejected": "❌"
+            }.get(sub["status"], "❓")
+            
+            result += f"{status_icon} **{sub['title']}**\n"
+            result += f"   - 投稿 ID: {sub['id']}\n"
+            result += f"   - 作者: {sub['author_name'] or '匿名'}\n"
+            result += f"   - 提交时间: {sub['submit_time']}\n"
+            result += f"   - 状态: {'待审核' if sub['status'] == 'pending' else '已批准' if sub['status'] == 'approved' else '已拒绝'}\n"
+            result += "\n"
+
+        yield result
+
+    @filter.llm_tool(name="review_submission")
+    async def review_submission(self, event, submission_id: str):
+        '''查看指定投稿的详细内容。需要主人权限。
+        
+        Args:
+            submission_id(string): 投稿 ID
+        '''
+        ok, msg = self._check_permission(event, force_owner=True)
+        if not ok:
+            yield msg
+            return
+
+        submission = self._submissions_cache.get(submission_id)
+        if not submission:
+            yield f"❌ 未找到投稿 ID: {submission_id}"
+            return
+
+        result = f"📄 投稿详情 (ID: {submission_id})\n\n"
+        result += f"标题: {submission['title']}\n"
+        result += f"作者: {submission['author_name'] or '匿名'}\n"
+        result += f"邮箱: {submission['author_email'] or '未提供'}\n"
+        result += f"提交时间: {submission['submit_time']}\n"
+        result += f"状态: {'待审核' if submission['status'] == 'pending' else '已批准' if submission['status'] == 'approved' else '已拒绝'}\n"
+        result += f"分类: {submission['category'] or '未设置'}\n"
+        result += f"标签: {submission['tags'] or '未设置'}\n"
+        result += f"描述: {submission['description'] or '未设置'}\n"
+        result += f"\n正文内容:\n\n{submission['content']}\n"
+
+        yield result
+
+    @filter.llm_tool(name="approve_submission")
+    async def approve_submission(self, event, submission_id: str):
+        '''批准指定投稿，将其发布到博客。需要主人权限。
+        
+        Args:
+            submission_id(string): 投稿 ID
+        '''
+        ok, msg = self._check_permission(event, force_owner=True)
+        if not ok:
+            yield msg
+            return
+
+        submission = self._submissions_cache.get(submission_id)
+        if not submission:
+            yield f"❌ 未找到投稿 ID: {submission_id}"
+            return
+
+        if submission["status"] != "pending":
+            yield f"❌ 投稿状态错误，当前状态: {'已批准' if submission['status'] == 'approved' else '已拒绝'}"
+            return
+
+        if not self.blog_manager:
+            yield "❌ 博客管理器未初始化，无法发布文章"
+            return
+
+        tag_list = [t.strip() for t in submission["tags"].split(",") if t.strip()]
+        extra: dict = {}
+        if submission["category"]:
+            extra["category"] = submission["category"]
+        if submission["description"]:
+            extra["description"] = submission["description"]
+        if submission["author_name"]:
+            extra["author"] = submission["author_name"]
+
+        filename = FilenameUtil.resolve(submission["title"])
+
+        if await self.blog_manager.exists(filename):
+            yield f"❌ 文章《{submission['title']}》已存在，无法发布。"
+            return
+
+        metadata = PostMetadata(
+            title=submission["title"],
+            tags=tag_list,
+            **extra
+        )
+
+        full_content = metadata.to_yaml() + "\n" + submission["content"]
+
+        if await self.blog_manager.write_post(filename, full_content):
+            submission["status"] = "approved"
+            yield f"✅ 投稿《{submission['title']}》已批准并发布！\n\n提示：需要重新构建部署才能在网站上显示。"
+        else:
+            yield f"❌ 发布投稿《{submission['title']}》失败。"
+
+    @filter.llm_tool(name="reject_submission")
+    async def reject_submission(self, event, submission_id: str, reason: str = ""):
+        '''拒绝指定投稿。需要主人权限。
+        
+        Args:
+            submission_id(string): 投稿 ID
+            reason(string): 拒绝原因（可选）
+        '''
+        ok, msg = self._check_permission(event, force_owner=True)
+        if not ok:
+            yield msg
+            return
+
+        submission = self._submissions_cache.get(submission_id)
+        if not submission:
+            yield f"❌ 未找到投稿 ID: {submission_id}"
+            return
+
+        if submission["status"] != "pending":
+            yield f"❌ 投稿状态错误，当前状态: {'已批准' if submission['status'] == 'approved' else '已拒绝'}"
+            return
+
+        submission["status"] = "rejected"
+        submission["reject_reason"] = reason
+
+        result = f"❌ 投稿《{submission['title']}》已拒绝。\n"
+        if reason:
+            result += f"拒绝原因: {reason}\n"
+        result += "\n提示：该投稿仍保留在列表中，可稍后重新审核。"
+
+        yield result
 
     # ========================================================================
     # 生命周期管理

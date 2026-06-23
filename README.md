@@ -2,9 +2,7 @@
 
 让 AstrBot 的 AI Agent 通过自然语言指令管理你的 [Firefly 博客](https://github.com/qiyueling2716/Firefly-Blog)。
 
-## 它能做什么
-
-这个插件把 Firefly 博客的日常操作封装成 AI 工具，Agent 可以直接调用，不需要你手动敲命令。
+## 功能特性
 
 ### 文章管理
 
@@ -25,7 +23,7 @@
 | 安装依赖 | 执行 `pnpm install` |
 | 构建博客 | 执行 `pnpm build` 生成静态站点 |
 | 部署博客 | 把 `dist/` 部署到 Web 服务器 |
-| 一键构建部署 | 自动执行环境检查 -> 依赖安装 -> 构建 -> 部署 |
+| 一键构建部署 | 自动执行环境检查 → 依赖安装 → 构建 → 部署 |
 
 ## 系统要求
 
@@ -36,7 +34,27 @@
 | Node.js | >= 22 | Firefly 博客构建需要 |
 | pnpm | 任意 | Firefly 依赖管理 |
 
-## 三种部署模式
+## 资源占用提醒
+
+### 内存需求
+
+Firefly 博客构建过程（`pnpm build`）会占用约 **1.5GB 内存**，这是 Astro 框架的正常行为。
+
+### 缓解方案
+
+1. **选择合适的部署模式**
+   - 如果 AstrBot 服务器内存有限（如 < 2GB），建议使用 `remote_build` 模式，让远端服务器承担构建工作
+   - 如果使用 `local_build` 或 `local_only` 模式，确保服务器至少有 2GB 可用内存
+
+2. **限制构建并发**
+   - 在插件配置中设置 `build_memory_threshold`（内存阈值，单位 MB）
+   - 当可用内存低于阈值时，插件会自动跳过构建并提示用户
+
+3. **定时构建**
+   - 将构建任务安排在服务器空闲时段执行
+   - 避免在高负载情况下触发构建
+
+## 部署模式
 
 插件支持三种模式，覆盖绝大多数部署场景：
 
@@ -46,7 +64,7 @@
 | `remote_build` | 通过 SSH 在远端服务器构建 | 远端服务器 | AstrBot 跑在轻量设备上（如树莓派），远端性能更好 |
 | `local_only` | AstrBot 所在服务器 | 同一台机器的本地目录 | 单服务器部署 |
 
-### 怎么选
+### 模式选择指南
 
 - **local_build**：AstrBot 在云服务器上，远端是低配 VPS 或静态托管
 - **remote_build**：AstrBot 在本地电脑/树莓派，远端是性能更好的服务器
@@ -56,7 +74,7 @@
 
 ### 通过 AstrBot WebUI（推荐）
 
-1. 打开 AstrBot WebUI -> 插件管理
+1. 打开 AstrBot WebUI → 插件管理
 2. 点击「安装插件」
 3. 输入仓库地址 `https://github.com/qiyueling2716/astrbot_plugin_Firefly_Blog_Manager`
 4. 点击安装，然后重载插件
@@ -74,7 +92,7 @@ pip install -r requirements.txt
 
 ## 配置
 
-在 AstrBot WebUI -> 插件管理 -> Firefly 博客管理 -> 配置：
+在 AstrBot WebUI → 插件管理 → Firefly 博客管理 → 配置。
 
 ### 配置项说明
 
@@ -91,6 +109,33 @@ pip install -r requirements.txt
 | `password` | 字符串 | SSH 登录密码 | `password` 认证时 |
 | `remote_blog_root` | 字符串 | 远端服务器上 Firefly 博客根目录 | `remote_build` |
 | `remote_web_root` | 字符串 | 远端 Web 服务器根目录 | `local_build`, `remote_build` |
+| `build_memory_threshold` | 整数 | 构建内存阈值（MB），默认 1536 | 全部 |
+| `build_memory_limit` | 整数 | 构建内存限制（MB），0 表示不限制 | 全部 |
+| `allow_build_concurrent` | 布尔 | 是否允许并发构建，默认 false | 全部 |
+| `allow_only_owner` | 布尔 | 是否只允许主人使用非构建类工具，默认 false | 全部 |
+| `owner_user_id` | 字符串 | 主人用户 ID，留空则使用 AstrBot 配置的主人 ID | 全部 |
+
+### 权限控制说明
+
+插件支持两种权限控制方式：
+
+| 工具类型 | 权限要求 | 说明 |
+|----------|----------|------|
+| **构建相关工具** | 始终需要主人权限 | `build_blog`、`deploy_blog`、`build_and_deploy_blog`、`install_blog_dependencies`、`auto_setup_blog` 等工具始终只能由主人使用，不受 `allow_only_owner` 配置影响 |
+| **投稿工具** | 任何人都可以使用 | `submit_post_draft` 工具允许任何人提交投稿，无需权限验证 |
+| **投稿审核工具** | 始终需要主人权限 | `list_post_submissions`、`review_submission`、`approve_submission`、`reject_submission` 等工具始终只能由主人使用 |
+| **文章管理工具** | 受 `allow_only_owner` 配置控制 | `create_blog_post`、`delete_blog_post`、`update_blog_post` 等工具在 `allow_only_owner=true` 时仅主人可用 |
+
+**权限配置示例**：
+
+```yaml
+# 允许所有人投稿，但文章管理仅主人可用
+allow_only_owner: true
+owner_user_id: ""  # 使用 AstrBot 配置的主人 ID
+
+# 或者指定自定义主人 ID
+owner_user_id: "user123"
+```
 
 ### 路径配置详解
 
@@ -267,7 +312,7 @@ powershell -File .\deploy.ps1
 
 ## 常见问题
 
-**Q: `web_root` 和 `remote_web_root` 应该填什么路径？**
+### Q: `web_root` 和 `remote_web_root` 应该填什么路径？
 
 填 Firefly 博客的部署目录，不是 Nginx 配置的网站根目录。
 
@@ -277,7 +322,7 @@ powershell -File .\deploy.ps1
 
 不确定的话，SSH 到服务器执行 `ls -la /var/www/firefly/` 查看。
 
-**Q: 如何启用 HTTPS？**
+### Q: 如何启用 HTTPS？
 
 1. 准备 SSL 证书文件（`.crt`）和密钥文件（`.key`）
 2. 在 `deploy.conf` 中配置：
@@ -290,14 +335,14 @@ powershell -File .\deploy.ps1
    ```
 3. 脚本会自动配置 HTTPS 并将 HTTP 重定向到 HTTPS
 
-**Q: 如何选择 Nginx 或 Apache？**
+### Q: 如何选择 Nginx 或 Apache？
 
 设置 `WEB_SERVER` 配置项：
 - `WEB_SERVER=nginx` — 使用 Nginx（默认）
 - `WEB_SERVER=apache` — 使用 Apache
 - `WEB_SERVER=none` — 不自动配置 Web 服务器
 
-**Q: 资源监控功能是什么？**
+### Q: 资源监控功能是什么？
 
 部署脚本提供了资源监控功能，在安装依赖和构建前会检查系统资源使用情况：
 
@@ -308,7 +353,7 @@ powershell -File .\deploy.ps1
 
 当资源使用率超过阈值时，脚本会显示警告并询问是否继续。构建过程中还会后台记录资源使用日志到 `build_resource_monitor.log`。
 
-**Q: `local_blog_root` 和 `web_root` 有什么区别？**
+### Q: `local_blog_root` 和 `web_root` 有什么区别？
 
 - `local_blog_root` — Firefly 博客项目的根目录，包含 `package.json` 和 `src/content/posts/`，是构建的**源**
 - `web_root` — Firefly 博客部署目录，构建产物 `dist/` 会复制到这里
@@ -326,19 +371,19 @@ powershell -File .\deploy.ps1
 └── posts/
 ```
 
-**Q: 构建时内存不足怎么办？**
+### Q: 构建时内存不足怎么办？
 
 选 `remote_build` 模式，让远端服务器承担构建工作。
 
-**Q: pnpm 依赖没装怎么办？**
+### Q: pnpm 依赖没装怎么办？
 
 插件会自动检测。如果 `node_modules` 不存在，执行构建时会提示你先运行 `install_blog_dependencies`。
 
-**Q: SSH 断联怎么办？**
+### Q: SSH 断联怎么办？
 
 插件使用 asyncssh，自带 keepalive（30 秒间隔，最多 3 次重试）。如果连接断开，下次操作时会自动重连。
 
-**Q: 文章修改后网站没变化？**
+### Q: 文章修改后网站没变化？
 
 Firefly 是静态博客，修改文章后必须重新构建并部署才会生效。
 

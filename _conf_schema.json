@@ -51,5 +51,30 @@
     "type": "string",
     "description": "远端 Web 服务器目录，构建产物将部署到这里。Firefly 博客通常部署在 /var/www/firefly",
     "default": "/var/www/firefly"
+  },
+  "build_memory_threshold": {
+    "type": "int",
+    "description": "构建内存阈值（MB）。当可用内存低于此值时，插件会自动跳过构建并提示用户。建议设置为 1536（1.5GB），即 Firefly 构建所需的最低内存",
+    "default": 1536
+  },
+  "build_memory_limit": {
+    "type": "int",
+    "description": "构建内存限制（MB）。设置为 0 表示不限制。当设置为非零值时，会在构建命令中添加内存限制参数",
+    "default": 0
+  },
+  "allow_build_concurrent": {
+    "type": "bool",
+    "description": "是否允许并发构建。设置为 false 时，同一时间只允许一个构建任务执行，避免内存竞争",
+    "default": false
+  },
+  "allow_only_owner": {
+    "type": "bool",
+    "description": "是否只允许主人使用非构建类工具（文章管理、投稿等）。设置为 true 时，非主人用户只能使用 submit_post_draft（投稿）工具，其他工具会被拒绝。注意：构建相关工具（build_blog、deploy_blog、build_and_deploy_blog、install_blog_dependencies、auto_setup_blog）始终只能由主人使用，不受此配置影响",
+    "default": false
+  },
+  "owner_user_id": {
+    "type": "string",
+    "description": "主人用户 ID。当需要验证主人权限时，只有此用户 ID 的用户可以使用受限工具。留空则使用 AstrBot 配置的主人 ID",
+    "default": ""
   }
 }
