@@ -238,13 +238,105 @@ function Check-PipDeps {
 # 3. 检测 Node.js
 # =============================================================================
 
+function Install-NodeJs {
+    Write-Step "安装 Node.js 22..."
+
+    # 优先使用 winget 安装（Windows 10 1709+ / Windows 11 自带）
+    if (Test-CommandExists "winget") {
+        Write-Info "使用 winget 安装 Node.js..."
+        
+        try {
+            # 使用 winget 安装 Node.js LTS 22.x
+            $process = Start-Process -FilePath "winget" -ArgumentList "install --id OpenJS.NodeJS.LTS --silent --accept-package-agreements --accept-source-agreements" -Wait -PassThru -NoNewWindow
+            
+            if ($process.ExitCode -eq 0 -or $process.ExitCode -eq 1618) {  # 1618 = 已安装
+                Write-Ok "Node.js 安装完成（或已安装）"
+                
+                # 刷新 PATH
+                $env:PATH = [System.Environment]::GetEnvironmentVariable("PATH", "Machine") + ";" + [System.Environment]::GetEnvironmentVariable("PATH", "User")
+                return $true
+            } else {
+                Write-Warn "winget 安装失败，退出码: $($process.ExitCode)，尝试其他方式..."
+            }
+        } catch {
+            Write-Warn "winget 安装失败: $_，尝试其他方式..."
+        }
+    }
+
+    # 备用方案：下载 MSI 安装包
+    Write-Info "winget 不可用或安装失败，尝试直接下载安装..."
+    
+    $downloadUrls = @(
+        "https://nodejs.org/dist/v22.11.0/node-v22.11.0-x64.msi",
+        "https://mirrors.tuna.tsinghua.edu.cn/nodejs-release/v22.11.0/node-v22.11.0-x64.msi",
+        "https://cdn.npmmirror.com/binaries/node/v22.11.0/node-v22.11.0-x64.msi"
+    )
+
+    $installerPath = Join-Path $env:TEMP "node-v22.11.0-x64.msi"
+    $downloadSuccess = $false
+
+    foreach ($url in $downloadUrls) {
+        try {
+            Write-Info "尝试从 $url 下载..."
+            
+            $webClient = New-Object System.Net.WebClient
+            $webClient.Headers.Add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
+            $webClient.Timeout = 300000  # 5分钟超时
+            
+            $webClient.DownloadFile($url, $installerPath)
+            $downloadSuccess = $true
+            Write-Ok "下载成功"
+            break
+        } catch {
+            Write-Warn "从 $url 下载失败: $_"
+        }
+    }
+
+    if (-not $downloadSuccess) {
+        Write-Err "无法从所有源下载 Node.js"
+        return $false
+    }
+
+    if (-not (Test-Path $installerPath)) {
+        Write-Err "下载的安装包不存在"
+        return $false
+    }
+
+    Write-Info "安装 Node.js..."
+    $process = Start-Process -FilePath "msiexec.exe" -ArgumentList "/i `"$installerPath`" /qn /norestart" -Wait -PassThru -NoNewWindow
+    
+    if ($process.ExitCode -ne 0) {
+        Write-Err "Node.js 安装失败，退出码: $($process.ExitCode)"
+        Write-Info "请尝试手动安装 Node.js"
+        Write-Info "下载地址: https://nodejs.org/"
+        return $false
+    }
+
+    Write-Ok "Node.js 安装完成"
+    
+    # 刷新 PATH
+    $env:PATH = [System.Environment]::GetEnvironmentVariable("PATH", "Machine") + ";" + [System.Environment]::GetEnvironmentVariable("PATH", "User")
+    
+    return $true
+}
+
 function Check-NodeJs {
     Write-Step "3. 检测 Node.js 环境..."
 
     if (-not (Test-CommandExists "node")) {
         Write-Warn "未找到 Node.js"
-        Write-Info "请先安装 Node.js 22 或更高版本"
-        Write-Info "下载地址: https://nodejs.org/"
+        Write-Info "正在自动安装 Node.js 22..."
+        
+        if (-not (Install-NodeJs)) {
+            Write-Err "无法自动安装 Node.js，请手动安装"
+            Write-Info "下载地址: https://nodejs.org/"
+            exit 1
+        }
+    }
+
+    # 再次检查
+    if (-not (Test-CommandExists "node")) {
+        Write-Err "安装后仍未找到 Node.js，请重启终端或检查 PATH"
         exit 1
     }
 
@@ -255,9 +347,14 @@ function Check-NodeJs {
     $minor = [int]$versionParts[1]
 
     if ($major -lt 22) {
-        Write-Err "Node.js 版本过低: $nodeVersion，Firefly 需要 >= 22"
-        Write-Info "下载地址: https://nodejs.org/"
-        exit 1
+        Write-Warn "Node.js 版本过低: $nodeVersion，需要 >= 22"
+        Write-Info "正在自动升级 Node.js..."
+        
+        if (-not (Install-NodeJs)) {
+            Write-Err "无法自动升级 Node.js，请手动安装"
+            Write-Info "下载地址: https://nodejs.org/"
+            exit 1
+        }
     }
 
     Write-Ok "Node.js $nodeVersion"
@@ -278,12 +375,33 @@ function Check-Pnpm {
                 Write-Err "npm 安装 pnpm 失败"
                 exit 1
             }
+            # 安装后刷新 PATH，使 pnpm 立即可用
+            $env:PATH = [System.Environment]::GetEnvironmentVariable("PATH", "Machine") + ";" + [System.Environment]::GetEnvironmentVariable("PATH", "User")
         } else {
             Write-Err "未找到 npm，无法安装 pnpm"
             exit 1
         }
     }
 
+    # 再次检查 pnpm 是否可用
+    if (-not (Test-CommandExists "pnpm")) {
+        # 尝试直接使用 node_modules 中的 pnpm
+        $npmPrefix = npm prefix -g 2>$null
+        if ($LASTEXITCODE -eq 0 -and $npmPrefix) {
+            $pnpmPath = Join-Path $npmPrefix "pnpm.cmd"
+            if (Test-Path $pnpmPath) {
+                Write-Info "使用全局安装的 pnpm: $pnpmPath"
+                $script:PNPM_CMD = $pnpmPath
+                $pnpmVersion = & $pnpmPath --version
+                Write-Ok "pnpm $pnpmVersion"
+                return
+            }
+        }
+        Write-Err "安装 pnpm 后仍然无法找到，请手动安装 pnpm"
+        exit 1
+    }
+
+    $script:PNPM_CMD = "pnpm"
     $pnpmVersion = pnpm --version
     Write-Ok "pnpm $pnpmVersion"
 }
@@ -479,7 +597,8 @@ function Install-BlogDeps {
 
     Push-Location $BlogRoot
     try {
-        if (-not (pnpm install)) {
+        Write-Info "执行: $PNPM_CMD install"
+        if (-not (& $PNPM_CMD install)) {
             Write-Err "pnpm install 失败"
             Write-Info "可能的原因:"
             Write-Info "  1. 网络连接问题"
@@ -528,7 +647,8 @@ function Build-Blog {
 
     Push-Location $BlogRoot
     try {
-        if (-not (pnpm build)) {
+        Write-Info "执行: $PNPM_CMD build"
+        if (-not (& $PNPM_CMD build)) {
             Stop-ResourceMonitor
             Write-Err "pnpm build 失败"
             exit 1
@@ -637,6 +757,8 @@ function Main {
     switch ($DeployMode) {
         "local_only" {
             Write-Step "执行本地部署..."
+            Check-NodeJs
+            Check-Pnpm
             Check-FireflyProject $LocalBlogRoot
             Install-BlogDeps $LocalBlogRoot
             Build-Blog $LocalBlogRoot
@@ -672,7 +794,7 @@ function Main {
 
     if ($DomainName) {
         $protocol = if ($EnableHttps -eq "true") { "https" } else { "http" }
-        Write-Host "博客地址: $protocol://$DomainName"
+        Write-Host "博客地址: ${protocol}://$DomainName"
     } else {
         Write-Host "请通过服务器 IP 或配置好的域名访问博客"
     }

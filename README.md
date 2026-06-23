@@ -126,44 +126,36 @@ pip install -r requirements.txt
 | `build_memory_threshold` | 整数 | 构建内存阈值（MB），默认 1536 | 全部 |
 | `build_memory_limit` | 整数 | 构建内存限制（MB），0 表示不限制 | 全部 |
 | `allow_build_concurrent` | 布尔 | 是否允许并发构建，默认 false | 全部 |
-| `allow_only_owner` | 布尔 | 是否只允许主人使用非构建类工具，默认 false | 全部 |
-| `owner_user_id` | 字符串 | 主人用户 ID，留空则使用 AstrBot 配置的主人 ID | 全部 |
-| `admin_users` | 列表 | 管理员用户 ID 列表，支持多个管理员，优先级高于 owner_user_id | 全部 |
+| `allow_only_owner` | 布尔 | 是否只允许管理员使用非构建类工具，默认 false | 全部 |
+| `owner_user_id` | 字符串 | 主人用户 ID（回退配置），插件优先使用 AstrBot 框架管理员系统 | 全部 |
+| `admin_users` | 列表 | 管理员用户 ID 列表（回退配置），插件优先使用 AstrBot 框架管理员系统 | 全部 |
 
 ### 权限控制说明
 
-插件支持两种权限控制方式：
+插件**优先复用 AstrBot 框架的管理员系统**，不再需要单独配置管理员：
 
 | 工具类型 | 权限要求 | 说明 |
 |----------|----------|------|
-| **构建相关工具** | 始终需要主人权限 | `build_blog`、`deploy_blog`、`build_and_deploy_blog`、`install_blog_dependencies`、`auto_setup_blog` 等工具始终只能由主人使用，不受 `allow_only_owner` 配置影响 |
+| **构建相关工具** | 始终需要管理员权限 | `build_blog`、`deploy_blog`、`build_and_deploy_blog`、`install_blog_dependencies`、`auto_setup_blog` 等工具始终只能由管理员使用 |
 | **投稿工具** | 任何人都可以使用 | `submit_post_draft` 工具允许任何人提交投稿，无需权限验证 |
-| **投稿审核工具** | 始终需要主人权限 | `list_post_submissions`、`review_submission`、`approve_submission`、`reject_submission` 等工具始终只能由主人使用 |
-| **文章管理工具** | 受 `allow_only_owner` 配置控制 | `create_blog_post`、`delete_blog_post`、`update_blog_post` 等工具在 `allow_only_owner=true` 时仅主人可用 |
+| **投稿审核工具** | 始终需要管理员权限 | `list_post_submissions`、`review_submission`、`approve_submission`、`reject_submission` 等工具始终只能由管理员使用 |
+| **文章管理工具** | 受 `allow_only_owner` 配置控制 | `create_blog_post`、`delete_blog_post`、`update_blog_post` 等工具在 `allow_only_owner=true` 时仅管理员可用 |
+
+**权限验证顺序**：
+
+1. 优先使用 AstrBot 框架提供的权限检查方法（`event.is_admin()`、`event.is_owner()`、`context.is_admin()`、`context.is_owner()`）
+2. 当框架方法不可用时，回退到插件配置文件中的 `admin_users` 和 `owner_user_id`
 
 **权限配置示例**：
 
 ```yaml
-# 允许所有人投稿，但文章管理仅主人可用
+# 允许所有人投稿，但文章管理仅管理员可用
 allow_only_owner: true
-owner_user_id: ""  # 使用 AstrBot 配置的主人 ID
 
-# 或者指定自定义主人 ID
-owner_user_id: "user123"
-
-# 或者配置多个管理员（推荐）
-admin_users:
-  - "user123"
-  - "user456"
-  - "user789"
+# 以下配置仅作为回退方案，通常不需要配置
+# owner_user_id: ""  # 留空即可，插件会自动使用 AstrBot 的主人 ID
+# admin_users: []     # 留空即可，插件会自动使用 AstrBot 的管理员列表
 ```
-
-**管理员来源优先级**（从高到低）：
-
-1. 插件配置中的 `admin_users`（列表）
-2. 插件配置中的 `owner_user_id`（单个）
-3. AstrBot 全局配置中的 `owner_id`（单个）
-4. AstrBot 全局配置中的管理员列表
 
 ### 路径配置详解
 

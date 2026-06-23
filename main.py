@@ -1335,7 +1335,7 @@ def require_build_manager(func):
     "astrbot_plugin_Firefly_Blog_Manager",
     "月凌",
     "通过 AI 指令管理 Firefly 博客文章和部署",
-    "1.3.3",
+    "1.3.4",
     "https://github.com/qiyueling2716/astrbot_plugin_Firefly_Blog_Manager",
 )
 class FireflyBlogManager(Star):
@@ -1382,59 +1382,66 @@ class FireflyBlogManager(Star):
             logger.error(f"[Firefly] 保存投稿缓存失败: {e}")
             return False
 
-    def _check_permission(self, event, force_owner: bool = False) -> tuple[bool, str]:
-        """检查用户是否有权限使用插件
-        
-        Args:
-            event: 事件对象，包含用户信息
-            force_owner: 是否强制要求主人/管理员权限（构建等危险操作使用）
-        
-        返回: (是否有权限, 错误消息或空字符串)
-        """
-        allow_only_owner = self.config.get("allow_only_owner", False)
-        
-        if force_owner or allow_only_owner:
-            admin_ids = self._get_admin_user_ids()
-            
-            if not admin_ids:
-                if force_owner:
-                    return False, "[ERROR] 构建操作需要主人/管理员权限，但未配置管理员用户 ID"
-                return False, "[ERROR] 已开启仅主人使用模式，但未配置管理员用户 ID"
-            
-            user_id = (
-                getattr(event, 'user_id', None) or
-                getattr(event, 'sender_id', None) or
-                getattr(event, 'from_id', None) or
-                getattr(event, 'user_id_holder', None)
-            )
-            
-            if user_id is not None:
-                user_id = str(user_id)
-            
-            if not user_id:
-                return False, "[ERROR] 无法获取用户 ID，无法验证权限"
-            
-            if user_id not in admin_ids:
-                if force_owner:
-                    return False, f"[ERROR] 构建操作仅允许管理员使用。当前用户 ID: {user_id}"
-                return False, f"[ERROR] 权限不足：此插件仅允许管理员使用。当前用户 ID: {user_id}"
-        
-        return True, ""
+    def _get_user_id(self, event) -> Optional[str]:
+        """从事件对象中获取用户 ID"""
+        user_id = (
+            getattr(event, 'user_id', None) or
+            getattr(event, 'sender_id', None) or
+            getattr(event, 'from_id', None) or
+            getattr(event, 'user_id_holder', None)
+        )
+        if user_id is not None:
+            return str(user_id)
+        return None
 
-    def _get_admin_user_ids(self) -> set[str]:
-        """获取管理员用户 ID 集合
+    def _is_admin(self, event) -> bool:
+        """检查用户是否是 AstrBot 管理员（复用框架权限系统）
         
-        管理员来源（优先级从高到低）：
-        1. 插件配置中的 admin_users（列表）
-        2. 插件配置中的 owner_user_id（单个）
-        3. AstrBot 全局配置中的 owner_id（单个）
-        4. AstrBot 全局配置中的管理员列表
-        
-        返回: 管理员用户 ID 集合
+        优先使用框架提供的权限检查方法：
+        1. event.is_admin() - 框架标准方法
+        2. event.is_owner() - 检查是否是主人
+        3. context.is_admin(user_id) - 通过 context 检查
         """
+        user_id = self._get_user_id(event)
+        if not user_id:
+            return False
+        
+        # 1. 优先使用 event 对象的权限检查方法
+        if hasattr(event, 'is_admin') and callable(event.is_admin):
+            try:
+                return event.is_admin()
+            except Exception:
+                pass
+        
+        # 2. 检查是否是主人
+        if hasattr(event, 'is_owner') and callable(event.is_owner):
+            try:
+                return event.is_owner()
+            except Exception:
+                pass
+        
+        # 3. 通过 context 检查
+        if hasattr(self.context, 'is_admin') and callable(self.context.is_admin):
+            try:
+                return self.context.is_admin(user_id)
+            except Exception:
+                pass
+        
+        # 4. 检查是否是主人（通过 context）
+        if hasattr(self.context, 'is_owner') and callable(self.context.is_owner):
+            try:
+                return self.context.is_owner(user_id)
+            except Exception:
+                pass
+        
+        # 5. 回退到配置文件检查（兼容旧版本框架）
+        return self._is_admin_from_config(user_id)
+
+    def _is_admin_from_config(self, user_id: str) -> bool:
+        """从配置文件检查用户是否是管理员（兼容旧版本框架）"""
         admin_ids = set()
         
-        # 1. 插件配置中的 admin_users（列表，最高优先级）
+        # 1. 插件配置中的 admin_users（列表）
         plugin_admins = self.config.get("admin_users", [])
         if isinstance(plugin_admins, list):
             for uid in plugin_admins:
@@ -1452,13 +1459,37 @@ class FireflyBlogManager(Star):
             if global_owner:
                 admin_ids.add(str(global_owner))
         
-        # 4. 尝试从 AstrBot 全局配置获取管理员列表
+        # 4. AstrBot 全局配置中的管理员列表
         if hasattr(self.context, 'config') and hasattr(self.context.config, 'admin_users') and self.context.config.admin_users:
             for uid in self.context.config.admin_users:
                 if uid:
                     admin_ids.add(str(uid))
         
-        return admin_ids
+        return user_id in admin_ids
+
+    def _check_permission(self, event, force_owner: bool = False) -> tuple[bool, str]:
+        """检查用户是否有权限使用插件
+        
+        Args:
+            event: 事件对象，包含用户信息
+            force_owner: 是否强制要求主人/管理员权限（构建等危险操作使用）
+        
+        返回: (是否有权限, 错误消息或空字符串)
+        """
+        allow_only_owner = self.config.get("allow_only_owner", False)
+        
+        if force_owner or allow_only_owner:
+            user_id = self._get_user_id(event)
+            
+            if not user_id:
+                return False, "[ERROR] 无法获取用户 ID，无法验证权限"
+            
+            if not self._is_admin(event):
+                if force_owner:
+                    return False, f"[ERROR] 构建操作仅允许管理员使用。当前用户 ID: {user_id}"
+                return False, f"[ERROR] 权限不足：此插件仅允许管理员使用。当前用户 ID: {user_id}"
+        
+        return True, ""
 
     def _is_firefly_blog(self, path: str) -> bool:
         """检查路径是否为 Firefly 博客项目"""

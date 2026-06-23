@@ -69,12 +69,12 @@
   },
   "allow_only_owner": {
     "type": "bool",
-    "description": "是否只允许主人使用非构建类工具（文章管理、投稿等）。设置为 true 时，非主人用户只能使用 submit_post_draft（投稿）工具，其他工具会被拒绝。注意：构建相关工具（build_blog、deploy_blog、build_and_deploy_blog、install_blog_dependencies、auto_setup_blog）始终只能由主人使用，不受此配置影响",
+    "description": "是否只允许管理员使用非构建类工具（文章管理、投稿等）。设置为 true 时，非管理员用户只能使用 submit_post_draft（投稿）工具，其他工具会被拒绝。注意：构建相关工具始终只能由管理员使用，不受此配置影响",
     "default": false
   },
   "owner_user_id": {
     "type": "string",
-    "description": "主人用户 ID。当需要验证主人权限时，只有此用户 ID 的用户可以使用受限工具。留空则使用 AstrBot 配置的主人 ID",
+    "description": "主人用户 ID（回退配置）。插件优先使用 AstrBot 框架的管理员系统，当框架方法不可用时，使用此配置作为回退。留空则自动使用 AstrBot 配置的主人 ID",
     "default": ""
   },
   "admin_users": {
@@ -82,7 +82,7 @@
     "items": {
       "type": "string"
     },
-    "description": "管理员用户 ID 列表。支持配置多个管理员，所有管理员都拥有主人级别的权限（包括构建、部署等危险操作）。优先级高于 owner_user_id",
+    "description": "管理员用户 ID 列表（回退配置）。插件优先使用 AstrBot 框架的管理员系统，当框架方法不可用时，使用此配置作为回退。支持配置多个管理员，所有管理员都拥有管理员级别的权限",
     "default": []
   }
 }
