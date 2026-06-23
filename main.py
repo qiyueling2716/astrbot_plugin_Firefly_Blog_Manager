@@ -2326,6 +2326,107 @@ class FireflyBlogManager(Star):
         yield result
 
     # ========================================================================
+    # 显式指令注册（用户可直接使用的命令）
+    # ========================================================================
+
+    @filter.command("博客列表", alias=["博客文章", "列出文章"], priority=5)
+    async def cmd_list_posts(self, event):
+        """列出所有博客文章"""
+        if not self.blog_manager:
+            yield event.plain_result("[ERROR] 博客管理器未初始化")
+            return
+        posts = await self.blog_manager.list_posts()
+        yield event.plain_result(self._format_post_list(posts))
+
+    @filter.command("博客搜索", alias=["搜索文章"], priority=5)
+    async def cmd_search_posts(self, event, keyword: str):
+        """搜索博客文章"""
+        if not self.blog_manager:
+            yield event.plain_result("[ERROR] 博客管理器未初始化")
+            return
+        posts = await self.blog_manager.list_posts()
+        results = []
+        keyword_lower = keyword.lower()
+        for post in posts:
+            if keyword_lower in post.title.lower() or keyword_lower in (post.description or "").lower() or any(keyword_lower in tag.lower() for tag in post.tags):
+                results.append(post)
+        if not results:
+            yield event.plain_result(f"[INFO] 未找到包含「{keyword}」的文章")
+        else:
+            yield event.plain_result(self._format_post_list(results))
+
+    @filter.command("博客环境", alias=["检查环境"], priority=5)
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    async def cmd_check_env(self, event):
+        """检查博客构建环境（仅管理员可用）"""
+        ok, msg = self._check_permission(event, force_owner=True)
+        if not ok:
+            yield event.plain_result(msg)
+            return
+        if not self.build_manager:
+            yield event.plain_result("[ERROR] 构建管理器未初始化")
+            return
+        ok, msg = await self.build_manager.check_environment()
+        prefix = "[OK]" if ok else "[ERROR]"
+        yield event.plain_result(f"{prefix} {msg}")
+
+    @filter.command("博客构建", alias=["构建博客"], priority=10)
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    async def cmd_build_blog(self, event):
+        """构建博客（仅管理员可用）"""
+        ok, msg = self._check_permission(event, force_owner=True)
+        if not ok:
+            yield event.plain_result(msg)
+            return
+        if not self.build_manager:
+            yield event.plain_result("[ERROR] 构建管理器未初始化")
+            return
+        ok, msg = await self.build_manager.build()
+        prefix = "[OK]" if ok else "[ERROR]"
+        yield event.plain_result(f"{prefix} {msg}")
+
+    @filter.command("博客部署", alias=["部署博客"], priority=10)
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    async def cmd_deploy_blog(self, event):
+        """部署博客到服务器（仅管理员可用）"""
+        ok, msg = self._check_permission(event, force_owner=True)
+        if not ok:
+            yield event.plain_result(msg)
+            return
+        if not self.build_manager:
+            yield event.plain_result("[ERROR] 构建管理器未初始化")
+            return
+        ok, msg = await self.build_manager.deploy()
+        prefix = "[OK]" if ok else "[ERROR]"
+        yield event.plain_result(f"{prefix} {msg}")
+
+    @filter.command("博客投稿列表", alias=["投稿列表", "待审核投稿"], priority=5)
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    async def cmd_list_submissions(self, event):
+        """查看投稿列表（仅管理员可用）"""
+        ok, msg = self._check_permission(event, force_owner=True)
+        if not ok:
+            yield event.plain_result(msg)
+            return
+        if not self._submissions_cache:
+            yield event.plain_result("[INFO] 暂无待审核的投稿")
+            return
+        submissions = sorted(self._submissions_cache.values(), key=lambda x: x["submit_time"], reverse=True)
+        result = "[INFO] 投稿列表:\n"
+        for sub in submissions:
+            status_map = {"pending": "[PENDING]", "approved": "[APPROVED]", "rejected": "[REJECTED]"}
+            status_str = status_map.get(sub["status"], "[UNKNOWN]")
+            author = sub["author_name"] or "匿名"
+            result += f"{status_str} {sub['title']} - {author} - {sub['submit_time']}\n"
+        yield event.plain_result(result)
+
+    @filter.command("内存状态", alias=["检查内存"], priority=5)
+    async def cmd_memory_status(self, event):
+        """检查当前内存状态（公开命令）"""
+        ok, msg = self._check_memory_status()
+        yield event.plain_result(msg)
+
+    # ========================================================================
     # 生命周期管理
     # ========================================================================
 
