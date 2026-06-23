@@ -20,6 +20,7 @@ Firefly 博客基于 Astro 框架，文章以 Markdown 文件形式存储，
 
 from __future__ import annotations
 
+import functools
 import os
 import posixpath
 import re
@@ -28,9 +29,10 @@ import shutil
 import asyncio
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, date
 from enum import Enum
 from typing import Optional, Dict, List, Any, Tuple, Union
+import json
 
 import yaml
 
@@ -96,7 +98,6 @@ class PostMetadata:
         }
         
         # 日期字段特殊处理：转换为 date 对象以确保 YAML 输出为日期类型
-        from datetime import date
         if self.published:
             date_obj = self._parse_date(self.published)
             if date_obj:
@@ -145,7 +146,7 @@ class PostMetadata:
         yaml_str = self._safe_dump_with_dates(data)
         return f"---\n{yaml_str}---\n"
 
-    def _parse_date(self, date_str: str) -> date:
+    def _parse_date(self, date_str: str) -> Optional[date]:
         """解析日期字符串为 datetime.date 对象
         
         Args:
@@ -154,7 +155,6 @@ class PostMetadata:
         Returns:
             datetime.date 对象，如果解析失败返回 None
         """
-        from datetime import datetime
         
         # 尝试多种常见格式
         formats = [
@@ -177,17 +177,14 @@ class PostMetadata:
 
     def _safe_dump_with_dates(self, data: dict) -> str:
         """安全地序列化数据，确保日期字段正确输出为日期类型"""
-        import yaml
         
-        # 为 date 类型注册自定义表示器，确保日期正确输出为 YAML 日期格式
-        from datetime import date
+        class DateDumper(yaml.Dumper):
+            def represent_data(self, data):
+                if isinstance(data, date):
+                    return self.represent_scalar('tag:yaml.org,2002:timestamp', str(data))
+                return super().represent_data(data)
         
-        def date_representer(dumper, data):
-            return dumper.represent_scalar('tag:yaml.org,2002:timestamp', str(data))
-        
-        yaml.add_representer(date, date_representer)
-        
-        return yaml.safe_dump(data, allow_unicode=True, sort_keys=False, default_flow_style=False)
+        return yaml.dump(data, allow_unicode=True, sort_keys=False, default_flow_style=False, Dumper=DateDumper)
 
     @classmethod
     def from_content(cls, content: str) -> tuple[PostMetadata, str]:
@@ -274,93 +271,6 @@ class DeployError(BlogManagerError):
 class SSHConnectionError(BlogManagerError):
     """SSH 连接错误"""
     pass
-
-
-# ============================================================================
-# 工具函数
-# ============================================================================
-
-def validate_config(config: Dict[str, Any]) -> List[str]:
-    """验证配置参数，返回错误信息列表"""
-    errors = []
-    
-    deploy_mode = config.get("deploy_mode", "")
-    if deploy_mode not in ["local_only", "local_build", "remote_build"]:
-        errors.append(f"无效的部署模式: {deploy_mode}")
-    
-    if deploy_mode in ["local_build", "remote_build"]:
-        if not config.get("server_ip"):
-            errors.append("远程部署模式需要配置服务器 IP")
-        if not config.get("username"):
-            errors.append("远程部署模式需要配置用户名")
-    
-    auth_type = config.get("auth_type", "key")
-    if auth_type not in ["key", "password"]:
-        errors.append(f"无效的认证类型: {auth_type}")
-    
-    if auth_type == "key" and not config.get("private_key_path"):
-        errors.append("密钥认证需要配置私钥路径")
-    
-    return errors
-
-
-def sanitize_filename(title: str) -> str:
-    """将标题转换为安全的文件名"""
-    # 移除特殊字符
-    filename = re.sub(r'[\\/:*?"<>|\x00-\x1f]', '_', title)
-    # 移除多个连续下划线
-    filename = re.sub(r'_+', '_', filename)
-    # 移除首尾下划线
-    filename = filename.strip('_')
-    # 如果为空，使用默认名称
-    if not filename:
-        filename = "untitled"
-    return filename
-
-
-def ensure_directory_exists(path: str) -> bool:
-    """确保目录存在，不存在则创建"""
-    try:
-        os.makedirs(path, exist_ok=True)
-        return True
-    except Exception as e:
-        logger.error(f"创建目录失败 {path}: {e}")
-        return False
-
-
-def generate_slug(title: str) -> str:
-    """从标题生成 URL 友好的 slug"""
-    slug = title.lower()
-    # 替换空格和特殊字符
-    slug = re.sub(r'[\s_]+', '-', slug)
-    # 移除非字母数字字符
-    slug = re.sub(r'[^a-z0-9\u4e00-\u9fff-]', '', slug)
-    # 移除连续的连字符
-    slug = re.sub(r'-+', '-', slug)
-    # 移除首尾连字符
-    slug = slug.strip('-')
-    return slug
-
-
-def format_datetime(dt: datetime) -> str:
-    """格式化日期时间为 ISO 格式"""
-    return dt.strftime("%Y-%m-%dT%H:%M:%S+08:00")
-
-
-def parse_datetime(date_str: str) -> Optional[datetime]:
-    """解析日期时间字符串"""
-    formats = [
-        "%Y-%m-%dT%H:%M:%S%z",
-        "%Y-%m-%dT%H:%M:%S",
-        "%Y-%m-%d %H:%M:%S",
-        "%Y-%m-%d",
-    ]
-    for fmt in formats:
-        try:
-            return datetime.strptime(date_str, fmt)
-        except ValueError:
-            continue
-    return None
 
 
 # ============================================================================
@@ -704,6 +614,8 @@ class RemoteFileSystem(FileSystem):
             sftp = await self.executor.get_sftp()
             async with sftp.open(path, "r") as f:
                 content = await f.read()
+                if isinstance(content, bytes):
+                    content = content.decode("utf-8", errors="replace")
                 return content
         except FileNotFoundError:
             logger.warning(f"[RemoteFileSystem] 远程文件不存在: {path}")
@@ -727,7 +639,9 @@ class RemoteFileSystem(FileSystem):
             if dir_path and dir_path != "/":
                 await self._mkdir_recursive(sftp, dir_path)
             
-            async with sftp.open(path, "w") as f:
+            async with sftp.open(path, "wb") as f:
+                if isinstance(content, str):
+                    content = content.encode("utf-8")
                 await f.write(content)
             return True
         except PermissionError:
@@ -948,7 +862,7 @@ class BuildDeployManager:
         
         if not blog_exists:
             msg = await self._clone_blog_repo()
-            if not msg.startswith("✅"):
+            if not msg.startswith("[OK]"):
                 return False, msg
         
         # 检查 package.json 是否存在，不存在则尝试克隆
@@ -964,7 +878,7 @@ class BuildDeployManager:
         
         if not package_exists:
             msg = await self._clone_blog_repo()
-            if not msg.startswith("✅"):
+            if not msg.startswith("[OK]"):
                 return False, msg
         
         rc, out, err = await executor.run("pnpm install", cwd=blog_root, timeout=300)
@@ -1043,11 +957,11 @@ class BuildDeployManager:
         # 先检查 git 是否安装
         rc, out, err = await executor.run("git --version", timeout=10)
         if rc != 0:
-            return "❌ 未安装 git，请先安装 git\n\n解决方案:\n- Ubuntu/Debian: sudo apt install git\n- CentOS/RHEL: sudo yum install git\n- macOS: brew install git\n- Windows: 下载安装 git"
+            return "[ERROR] 未安装 git，请先安装 git\n\n解决方案:\n- Ubuntu/Debian: sudo apt install git\n- CentOS/RHEL: sudo yum install git\n- macOS: brew install git\n- Windows: 下载安装 git"
         
         # 创建父目录
         if self.deploy_mode == DeployMode.REMOTE_BUILD:
-            parent_dir = os.path.dirname(blog_root)
+            parent_dir = posixpath.dirname(blog_root)
             await executor.run(f"mkdir -p {parent_dir}", timeout=10)
         else:
             parent_dir = os.path.dirname(blog_root)
@@ -1075,10 +989,10 @@ class BuildDeployManager:
                 # 目录已存在且非空，检查是否已经是 Firefly 博客
                 if await self._is_firefly_blog(blog_root):
                     logger.info(f"[Build] 目标目录已存在且是 Firefly 博客，跳过克隆")
-                    return f"✅ 目标目录已存在且是 Firefly 博客: {blog_root}"
+                    return f"[OK] 目标目录已存在且是 Firefly 博客: {blog_root}"
                 else:
                     # 目录存在但不是 Firefly 博客，询问是否覆盖
-                    return f"❌ 目标目录已存在但不是 Firefly 博客\n目录: {blog_root}\n请手动清理该目录后重试，或在配置中指定其他路径"
+                    return f"[ERROR] 目标目录已存在但不是 Firefly 博客\n目录: {blog_root}\n请手动清理该目录后重试，或在配置中指定其他路径"
         
         # 尝试克隆仓库
         rc, out, err = await executor.run(f"git clone {repo_url} {blog_root}", timeout=120)
@@ -1086,9 +1000,9 @@ class BuildDeployManager:
             logger.warning(f"[Build] 主仓库克隆失败，尝试镜像: {err}")
             rc, out, err = await executor.run(f"git clone {mirror_url} {blog_root}", timeout=120)
             if rc != 0:
-                return f"❌ 克隆博客仓库失败\n错误信息: {err}\n\n可能的解决方案:\n1. 检查网络连接\n2. 尝试手动克隆: git clone {repo_url} {blog_root}\n3. 检查目标目录是否有写入权限"
+                return f"[ERROR] 克隆博客仓库失败\n错误信息: {err}\n\n可能的解决方案:\n1. 检查网络连接\n2. 尝试手动克隆: git clone {repo_url} {blog_root}\n3. 检查目标目录是否有写入权限"
         
-        return f"✅ 成功克隆 Firefly 博客仓库到 {blog_root}"
+        return f"[OK] 成功克隆 Firefly 博客仓库到 {blog_root}"
 
     async def build(self) -> tuple[bool, str]:
         """执行 pnpm build 构建博客"""
@@ -1137,23 +1051,28 @@ class BuildDeployManager:
         auth_type = self.config.get("auth_type", "key")
 
         # 优先使用 rsync 部署
-        ssh_opts = f"-p {port}"
-        if auth_type == "password":
-            password = self.config.get("password", "")
-            rsync_cmd = (
-                f'sshpass -p "{password}" rsync -avz --delete '
-                f'-e "ssh {ssh_opts} -o StrictHostKeyChecking=no" '
-                f'"{local_dist}/" "{username}@{hostname}:{self.remote_web_root}/"'
-            )
-        else:
+        ssh_opts = f"-p {port} -o StrictHostKeyChecking=no"
+        if auth_type == "key":
             key_path = self.config.get("private_key_path", "")
             if key_path and os.path.exists(key_path):
                 ssh_opts += f" -i {key_path}"
             rsync_cmd = (
                 f'rsync -avz --delete '
-                f'-e "ssh {ssh_opts} -o StrictHostKeyChecking=no" '
+                f'-e "ssh {ssh_opts}" '
                 f'"{local_dist}/" "{username}@{hostname}:{self.remote_web_root}/"'
             )
+        else:
+            # 密码认证：使用 SSH_ASKPASS 模式或警告用户
+            password = self.config.get("password", "")
+            if not password:
+                return False, "密码认证模式下未配置密码"
+            logger.warning("[Firefly] 密码认证将临时写入 SSH 配置文件，部署后立即清理")
+            sshpass_cmd = (
+                f'sshpass -e rsync -avz --delete '
+                f'-e "ssh {ssh_opts}" '
+                f'"{local_dist}/" "{username}@{hostname}:{self.remote_web_root}/"'
+            )
+            rsync_cmd = f"export SSHPASS='{password}'; {sshpass_cmd}; unset SSHPASS"
 
         rc, out, err = await self.local_executor.run(rsync_cmd, timeout=300)
         if rc != 0:
@@ -1176,14 +1095,7 @@ class BuildDeployManager:
         """通过 scp 部署（rsync 失败时的回退方案）"""
         ssh_opts = f"-P {port} -o StrictHostKeyChecking=no"
 
-        if auth_type == "password":
-            password = self.config.get("password", "")
-            await self.remote_executor.run(f"rm -rf {self.remote_web_root}/*")
-            scp_cmd = (
-                f'sshpass -p "{password}" scp -r {ssh_opts} '
-                f'"{local_dist}/*" "{username}@{hostname}:{self.remote_web_root}/"'
-            )
-        else:
+        if auth_type == "key":
             key_path = self.config.get("private_key_path", "")
             if key_path and os.path.exists(key_path):
                 ssh_opts += f" -i {key_path}"
@@ -1191,6 +1103,17 @@ class BuildDeployManager:
                 f'scp -r {ssh_opts} '
                 f'"{local_dist}/*" "{username}@{hostname}:{self.remote_web_root}/"'
             )
+        else:
+            password = self.config.get("password", "")
+            if not password:
+                return False, "密码认证模式下未配置密码"
+            logger.warning("[Firefly] 密码认证将使用环境变量传递密码，避免泄露到进程列表")
+            await self.remote_executor.run(f"rm -rf {self.remote_web_root}/*")
+            sshpass_cmd = (
+                f'sshpass -e scp -r {ssh_opts} '
+                f'"{local_dist}/*" "{username}@{hostname}:{self.remote_web_root}/"'
+            )
+            scp_cmd = f"export SSHPASS='{password}'; {sshpass_cmd}; unset SSHPASS"
 
         rc, out, err = await self.local_executor.run(scp_cmd, timeout=300)
         if rc != 0:
@@ -1239,14 +1162,76 @@ class FilenameUtil:
         safe = re.sub(r'[^\w\s\u4e00-\u9fff-]', '', title)
         safe = re.sub(r'[-\s]+', '-', safe)
         return safe.lower().strip('-')
-
+    
     @staticmethod
     def resolve(title_or_filename: str) -> str:
         """解析用户输入为文件名，如果已经是 .md 后缀则直接使用"""
+        # 安全检查：防止路径遍历
+        if not title_or_filename:
+            return "untitled.md"
+        
+        # 检测危险字符
+        if ".." in title_or_filename:
+            # 移除所有 ..
+            cleaned = title_or_filename.replace("..", "")
+            title_or_filename = cleaned or "untitled.md"
+        
+        # 处理路径分隔符：只取文件名部分
+        # Windows 和 Linux 都要处理
+        title_or_filename = title_or_filename.replace("\\", "/")
+        if "/" in title_or_filename:
+            title_or_filename = title_or_filename.split("/")[-1]
+        
+        # 移除盘符
+        if re.match(r'^[A-Za-z]:', title_or_filename):
+            title_or_filename = title_or_filename.split(":", 1)[-1]
+            if title_or_filename.startswith("/"):
+                title_or_filename = title_or_filename[1:]
+        
         if title_or_filename.endswith(".md"):
             return title_or_filename
         return f"{FilenameUtil.sanitize(title_or_filename)}.md"
 
+
+# ============================================================================
+# 装饰器定义
+# ============================================================================
+
+def require_permission(force_owner: bool = False):
+    """权限检查装饰器"""
+    def decorator(func):
+        @functools.wraps(func)
+        async def wrapper(self, event, *args, **kwargs):
+            ok, msg = self._check_permission(event, force_owner=force_owner)
+            if not ok:
+                yield msg
+                return
+            async for result in func(self, event, *args, **kwargs):
+                yield result
+        return wrapper
+    return decorator
+
+def require_blog_manager(func):
+    """博客管理器检查装饰器"""
+    @functools.wraps(func)
+    async def wrapper(self, event, *args, **kwargs):
+        if not self.blog_manager:
+            yield "[ERROR] 博客管理器未初始化"
+            return
+        async for result in func(self, event, *args, **kwargs):
+            yield result
+    return wrapper
+
+def require_build_manager(func):
+    """构建管理器检查装饰器"""
+    @functools.wraps(func)
+    async def wrapper(self, event, *args, **kwargs):
+        if not self.build_manager:
+            yield "[ERROR] 构建管理器未初始化"
+            return
+        async for result in func(self, event, *args, **kwargs):
+            yield result
+    return wrapper
 
 # ============================================================================
 # 插件主类
@@ -1256,7 +1241,7 @@ class FilenameUtil:
     "astrbot_plugin_Firefly_Blog_Manager",
     "月凌",
     "通过 AI 指令管理 Firefly 博客文章和部署",
-    "2.0.0",
+    "1.3.1",
     "https://github.com/qiyueling2716/astrbot_plugin_Firefly_Blog_Manager",
 )
 class FireflyBlogManager(Star):
@@ -1275,6 +1260,78 @@ class FireflyBlogManager(Star):
         self.blog_manager: Optional[BlogManager] = None
         self.build_manager: Optional[BuildDeployManager] = None
         self._init_components()
+        
+        # 投稿持久化配置
+        self._submissions_file = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), 
+            "_submissions_cache.json"
+        )
+        self._submissions_cache = self._load_submissions()
+    
+    def _load_submissions(self) -> dict:
+        """从文件加载投稿缓存"""
+        try:
+            if os.path.exists(self._submissions_file):
+                with open(self._submissions_file, 'r', encoding='utf-8') as f:
+                    return json.load(f)
+        except Exception as e:
+            logger.warning(f"[Firefly] 加载投稿缓存失败: {e}")
+        return {}
+    
+    def _save_submissions(self) -> bool:
+        """保存投稿缓存到文件"""
+        try:
+            with open(self._submissions_file, 'w', encoding='utf-8') as f:
+                json.dump(self._submissions_cache, f, ensure_ascii=False, indent=2)
+            return True
+        except Exception as e:
+            logger.error(f"[Firefly] 保存投稿缓存失败: {e}")
+            return False
+
+    def _check_permission(self, event, force_owner: bool = False) -> tuple[bool, str]:
+        """检查用户是否有权限使用插件
+        
+        Args:
+            event: 事件对象，包含用户信息
+            force_owner: 是否强制要求主人权限（构建等危险操作使用）
+        
+        返回: (是否有权限, 错误消息或空字符串)
+        """
+        allow_only_owner = self.config.get("allow_only_owner", False)
+        
+        if force_owner or allow_only_owner:
+            owner_user_id = self.config.get("owner_user_id", "")
+            if not owner_user_id:
+                owner_user_id = self.context.config.owner_id
+            
+            if not owner_user_id:
+                if force_owner:
+                    return False, "[ERROR] 构建操作需要主人权限，但未配置主人用户 ID"
+                # allow_only_owner 开启但未配置主人 ID 时拒绝访问（安全优先）
+                return False, "[ERROR] 已开启仅主人使用模式，但未配置主人用户 ID"
+            
+            # 尝试获取用户 ID，支持多种字段名
+            user_id = (
+                getattr(event, 'user_id', None) or
+                getattr(event, 'sender_id', None) or
+                getattr(event, 'from_id', None) or
+                getattr(event, 'user_id_holder', None)
+            )
+            
+            # 类型统一化：转为字符串比较
+            if user_id is not None:
+                user_id = str(user_id)
+                owner_user_id = str(owner_user_id)
+            
+            if not user_id:
+                return False, "[ERROR] 无法获取用户 ID，无法验证权限"
+            
+            if user_id != owner_user_id:
+                if force_owner:
+                    return False, f"[ERROR] 构建操作仅允许主人使用。当前用户 ID: {user_id}"
+                return False, f"[ERROR] 权限不足：此插件仅允许主人使用。当前用户 ID: {user_id}"
+        
+        return True, ""
 
     def _is_firefly_blog(self, path: str) -> bool:
         """检查路径是否为 Firefly 博客项目"""
@@ -1305,22 +1362,46 @@ class FireflyBlogManager(Star):
     def _check_system_resources(self) -> tuple[bool, str]:
         """检查系统资源是否足以构建博客"""
         # 检查磁盘空间（至少需要 500MB）
-        disk_usage = shutil.disk_usage("/")
-        free_space_gb = disk_usage.free / (1024 ** 3)
-        if free_space_gb < 0.5:
-            return False, f"磁盘空间不足，仅剩余 {free_space_gb:.2f} GB，建议至少 500MB"
+        try:
+            # Windows 兼容：使用当前盘符或根目录
+            disk_path = os.path.abspath(os.sep) if os.name == 'nt' else "/"
+            disk_usage = shutil.disk_usage(disk_path)
+            free_space_gb = disk_usage.free / (1024 ** 3)
+            if free_space_gb < 0.5:
+                return False, f"磁盘空间不足，仅剩余 {free_space_gb:.2f} GB，建议至少 500MB"
+        except Exception as e:
+            logger.warning(f"[Firefly] 磁盘空间检查失败: {e}")
         
-        # 检查内存（至少需要 512MB）
+        # 检查内存（使用配置的阈值，默认 1536MB = 1.5GB）
+        memory_threshold = self.config.get("build_memory_threshold", 1536)
         try:
             import psutil
             mem = psutil.virtual_memory()
             available_mb = mem.available / (1024 ** 2)
-            if available_mb < 512:
-                return False, f"内存不足，仅剩余 {available_mb:.2f} MB，建议至少 512MB"
+            total_mb = mem.total / (1024 ** 2)
+            used_percent = mem.percent
+            
+            if available_mb < memory_threshold:
+                return False, f"内存不足，仅剩余 {available_mb:.2f} MB（总内存 {total_mb:.0f} MB，使用率 {used_percent:.1f}%）。构建 Firefly 博客需要约 1.5GB 内存，建议设置 build_memory_threshold 为更低的值，或使用 remote_build 模式让远端服务器承担构建工作。"
+            
+            return True, f"资源充足。可用内存: {available_mb:.2f} MB（总内存 {total_mb:.0f} MB，使用率 {used_percent:.1f}%）"
         except ImportError:
-            pass  # psutil 不是必须的
-        
-        return True, "资源充足"
+            return True, "资源检查：psutil 未安装，跳过内存检查"
+    
+    def _check_memory_status(self) -> tuple[bool, str]:
+        """检查当前内存状态，返回详细信息"""
+        try:
+            import psutil
+            mem = psutil.virtual_memory()
+            available_mb = mem.available / (1024 ** 2)
+            total_mb = mem.total / (1024 ** 2)
+            used_percent = mem.percent
+            memory_threshold = self.config.get("build_memory_threshold", 1536)
+            
+            status = "[OK]" if available_mb >= memory_threshold else "[WARNING]"
+            return True, f"{status} 当前内存状态:\n- 总内存: {total_mb:.0f} MB\n- 可用内存: {available_mb:.2f} MB\n- 使用率: {used_percent:.1f}%\n- 构建阈值: {memory_threshold} MB\n- 是否满足构建条件: {'是' if available_mb >= memory_threshold else '否'}"
+        except ImportError:
+            return False, "[ERROR] psutil 未安装，无法检查内存状态。请安装 psutil: pip install psutil"
 
     def _find_local_blog_root(self) -> tuple[str, bool, bool]:
         """智能查找本地已部署的 Firefly 博客目录
@@ -1386,18 +1467,16 @@ class FireflyBlogManager(Star):
         deploy_mode = DeployMode(self.config.get("deploy_mode", "local_build"))
         
         # local_build 和 local_only 模式下智能检测博客目录
-        blog_root = DEFAULT_BLOG_ROOT
-        blog_found = False
-        blog_built = False
-        
         if deploy_mode in (DeployMode.LOCAL_BUILD, DeployMode.LOCAL_ONLY):
-            blog_root, blog_built, auto_detected = self._find_local_blog_root()
-            blog_found = auto_detected
+            blog_root, _, auto_detected = self._find_local_blog_root()
             
             # 如果自动检测到博客目录，更新配置
             if auto_detected:
                 self.config["local_blog_root"] = blog_root
                 logger.info(f"[Firefly] 已更新配置 local_blog_root: {blog_root}")
+        else:
+            # 远程构建模式使用配置的远程路径
+            blog_root = self.config.get("remote_blog_root", DEFAULT_BLOG_ROOT)
         
         posts_dir = os.path.join(blog_root, "src", "content", "posts")
 
@@ -1430,11 +1509,11 @@ class FireflyBlogManager(Star):
     def _format_post_list(self, posts: list[PostInfo]) -> str:
         """格式化文章列表为可读文本"""
         if not posts:
-            return "📭 博客目前没有文章。"
+            return "[INFO] 博客目前没有文章"
 
-        lines = [f"📚 当前共有 {len(posts)} 篇文章："]
+        lines = [f"[INFO] 当前共有 {len(posts)} 篇文章:"]
         for post in posts:
-            status = "📝" if not post.draft else "🚧"
+            status = "[PUBLISHED]" if not post.draft else "[DRAFT]"
             tags_str = f" [{', '.join(post.tags)}]" if post.tags else ""
             category_str = f" ({post.category})" if post.category else ""
             lines.append(f"{status} {post.title}{category_str}{tags_str}")
@@ -1458,6 +1537,8 @@ class FireflyBlogManager(Star):
     # ========================================================================
 
     @filter.llm_tool(name="create_blog_post")
+    @require_permission()
+    @require_blog_manager
     async def create_post(
         self,
         event,
@@ -1487,15 +1568,12 @@ class FireflyBlogManager(Star):
             image(string): 文章封面图片路径
             author(string): 文章作者
             comment(boolean): 是否启用评论功能，默认启用
-        '''
-        if not self.blog_manager:
-            yield "❌ 博客管理器未初始化"
-            return
 
+        '''
         filename = FilenameUtil.resolve(title)
 
         if await self.blog_manager.exists(filename):
-            yield f"❌ 文章《{title}》已存在。"
+            yield f"[ERROR] 文章《{title}》已存在"
             return
 
         tag_list = [t.strip() for t in tags.split(",") if t.strip()]
@@ -1520,67 +1598,64 @@ class FireflyBlogManager(Star):
         full_content = self._build_post_content(title, content, tag_list, **extra)
 
         if await self.blog_manager.write_post(filename, full_content):
-            yield f"✅ 文章《{title}》创建成功！\n提示：创建文章后需要重新构建部署才能生效。"
+            yield f"[OK] 文章《{title}》创建成功\n提示：创建文章后需要重新构建部署才能生效"
         else:
-            yield f"❌ 创建文章《{title}》失败。"
+            yield f"[ERROR] 创建文章《{title}》失败"
 
     @filter.llm_tool(name="delete_blog_post")
+    @require_permission()
+    @require_blog_manager
     async def delete_post(self, event, title: str):
         '''删除 Firefly 博客上的一篇文章。
 
         Args:
             title(string): 文章标题或文件名
         '''
-        if not self.blog_manager:
-            yield "❌ 博客管理器未初始化"
-            return
-
         filename = FilenameUtil.resolve(title)
 
         if not await self.blog_manager.exists(filename):
-            yield f"❌ 文章《{title}》不存在。"
+            yield f"[ERROR] 文章《{title}》不存在"
             return
 
         if await self.blog_manager.delete_post(filename):
-            yield f"✅ 文章《{title}》已删除。\n提示：删除后需要重新构建部署才能生效。"
+            yield f"[OK] 文章《{title}》已删除\n提示：删除后需要重新构建部署才能生效"
         else:
-            yield f"❌ 删除文章《{title}》失败。"
+            yield f"[ERROR] 删除文章《{title}》失败"
 
     @filter.llm_tool(name="list_blog_posts")
+    @require_permission()
+    @require_blog_manager
     async def list_posts(self, event):
         '''列出 Firefly 博客上的所有文章。'''
-        if not self.blog_manager:
-            yield "❌ 博客管理器未初始化"
-            return
-
         posts = await self.blog_manager.list_posts()
         yield self._format_post_list(posts)
 
     @filter.llm_tool(name="get_blog_post")
+    @require_permission()
+    @require_blog_manager
     async def get_post(self, event, title: str):
         '''获取 Firefly 博客上指定文章的完整内容。
 
         Args:
             title(string): 文章标题或文件名
         '''
-        if not self.blog_manager:
-            yield "❌ 博客管理器未初始化"
-            return
 
         filename = FilenameUtil.resolve(title)
 
         if not await self.blog_manager.exists(filename):
-            yield f"❌ 文章《{title}》不存在。"
+            yield f"[ERROR] 文章《{title}》不存在"
             return
 
         content = await self.blog_manager.read_post(filename)
         if content is None:
-            yield f"❌ 读取文章《{title}》失败。"
+            yield f"[ERROR] 读取文章《{title}》失败"
             return
 
-        yield f"📄 文章《{title}》内容：\n\n{content}"
+        yield f"[INFO] 文章《{title}》内容:\n\n{content}"
 
     @filter.llm_tool(name="update_blog_post")
+    @require_permission()
+    @require_blog_manager
     async def update_post(
         self,
         event,
@@ -1611,19 +1686,15 @@ class FireflyBlogManager(Star):
             author(string): 文章作者，为空则不修改
             comment(boolean): 是否启用评论功能，为None则不修改
         '''
-        if not self.blog_manager:
-            yield "❌ 博客管理器未初始化"
-            return
-
         old_filename = FilenameUtil.resolve(title)
 
         if not await self.blog_manager.exists(old_filename):
-            yield f"❌ 文章《{title}》不存在。"
+            yield f"[ERROR] 文章《{title}》不存在"
             return
 
         old_content = await self.blog_manager.read_post(old_filename)
         if old_content is None:
-            yield f"❌ 读取文章《{title}》失败。"
+            yield f"[ERROR] 读取文章《{title}》失败"
             return
 
         metadata, body = PostMetadata.from_content(old_content)
@@ -1632,7 +1703,7 @@ class FireflyBlogManager(Star):
         if new_title and new_title != metadata.title:
             new_filename = FilenameUtil.resolve(new_title)
             if await self.blog_manager.exists(new_filename):
-                yield f"❌ 目标文章《{new_title}》已存在。"
+                yield f"[ERROR] 目标文章《{new_title}》已存在"
                 return
 
             metadata.title = new_title
@@ -1662,9 +1733,9 @@ class FireflyBlogManager(Star):
 
             if await self.blog_manager.write_post(new_filename, new_full_content):
                 await self.blog_manager.delete_post(old_filename)
-                yield f"✅ 文章已重命名为《{new_title}》。\n提示：需要重新构建部署才能生效。"
+                yield f"[OK] 文章已重命名为《{new_title}》\n提示：需要重新构建部署才能生效"
             else:
-                yield "❌ 更新文章失败。"
+                yield "[ERROR] 更新文章失败"
             return
 
         # 仅更新内容/元数据
@@ -1691,20 +1762,19 @@ class FireflyBlogManager(Star):
         full_content = metadata.to_yaml() + "\n" + body
 
         if await self.blog_manager.write_post(old_filename, full_content):
-            yield f"✅ 文章《{metadata.title}》更新成功！\n提示：需要重新构建部署才能生效。"
+            yield f"[OK] 文章《{metadata.title}》更新成功\n提示：需要重新构建部署才能生效"
         else:
-            yield f"❌ 更新文章《{metadata.title}》失败。"
+            yield f"[ERROR] 更新文章《{metadata.title}》失败"
 
     @filter.llm_tool(name="search_blog_posts")
+    @require_permission()
+    @require_blog_manager
     async def search_posts(self, event, keyword: str):
         '''在 Firefly 博客中搜索文章。
 
         Args:
             keyword(string): 搜索关键词
         '''
-        if not self.blog_manager:
-            yield "❌ 博客管理器未初始化"
-            return
 
         posts = await self.blog_manager.list_posts()
         results = []
@@ -1717,7 +1787,7 @@ class FireflyBlogManager(Star):
                 results.append(post)
 
         if not results:
-            yield f"🔍 未找到包含「{keyword}」的文章。"
+            yield f"[INFO] 未找到包含「{keyword}」的文章"
         else:
             yield self._format_post_list(results)
 
@@ -1726,232 +1796,555 @@ class FireflyBlogManager(Star):
     # ========================================================================
 
     @filter.llm_tool(name="check_blog_environment")
+    @require_permission()
+    @require_build_manager
     async def check_environment(self, event):
         '''检查 Firefly 博客的构建环境是否就绪（Node.js 和 pnpm）。'''
-        if not self.build_manager:
-            yield "❌ 构建管理器未初始化"
-            return
-
         ok, msg = await self.build_manager.check_environment()
-        if ok:
-            yield f"✅ {msg}"
-        else:
-            yield f"❌ {msg}"
+        prefix = "[OK]" if ok else "[ERROR]"
+        yield f"{prefix} {msg}"
 
     @filter.llm_tool(name="install_blog_dependencies")
+    @require_permission(force_owner=True)
+    @require_build_manager
     async def install_dependencies(self, event):
-        '''安装 Firefly 博客的依赖（执行 pnpm install）。'''
-        if not self.build_manager:
-            yield "❌ 构建管理器未初始化"
-            return
+        '''安装 Firefly 博客的依赖（执行 pnpm install）。需要主人权限。'''
 
         ok, msg = await self.build_manager.install_dependencies()
-        if ok:
-            yield f"✅ {msg}"
-        else:
-            yield f"❌ {msg}"
+        prefix = "[OK]" if ok else "[ERROR]"
+        yield f"{prefix} {msg}"
 
     @filter.llm_tool(name="build_blog")
+    @require_permission(force_owner=True)
+    @require_build_manager
     async def build_blog(self, event):
-        '''构建 Firefly 博客（执行 pnpm build）。构建可能需要较长时间。'''
-        if not self.build_manager:
-            yield "❌ 构建管理器未初始化"
-            return
-
+        '''构建 Firefly 博客（执行 pnpm build）。构建可能需要较长时间，占用约 1.5GB 内存。需要主人权限。'''
         # 检查环境
         ok, msg = await self.build_manager.check_environment()
         if not ok:
-            yield f"❌ 环境检查失败: {msg}\n请先安装 Node.js 和 pnpm。"
+            yield f"[ERROR] 环境检查失败: {msg}\n请先安装 Node.js 和 pnpm"
             return
 
         # 检查依赖
         if not await self.build_manager.check_dependencies_installed():
-            yield "⚠️ 依赖未安装，请先执行 install_blog_dependencies。"
+            yield "[WARNING] 依赖未安装，请先执行 install_blog_dependencies"
             return
+
+        # 检查内存是否满足构建条件
+        ok, msg = self._check_system_resources()
+        if not ok:
+            yield f"[ERROR] {msg}"
+            return
+
+        yield f"[INFO] {msg}"
 
         ok, msg = await self.build_manager.build()
         if ok:
-            yield f"✅ {msg}\n构建产物位于 dist/ 目录。"
+            yield f"[OK] {msg}\n构建产物位于 dist/ 目录"
         else:
-            yield f"❌ {msg}"
+            yield f"[ERROR] {msg}"
+
+    @filter.llm_tool(name="check_memory_status")
+    @require_permission()
+    async def check_memory_status(self, event):
+        '''检查当前系统内存状态，判断是否满足构建条件。
+        
+        返回当前总内存、可用内存、使用率以及是否满足构建阈值。
+        '''
+        ok, msg = self._check_memory_status()
+        yield msg
+
+    @filter.llm_tool(name="check_build_resource")
+    @require_permission()
+    async def check_build_resource(self, event):
+        '''检查构建博客所需的资源是否充足（磁盘空间和内存）。
+        
+        构建 Firefly 博客需要约 1.5GB 内存和 500MB 磁盘空间。
+        '''
+        ok, msg = self._check_system_resources()
+        prefix = "[OK]" if ok else "[ERROR]"
+        yield f"{prefix} {msg}"
+
+    @filter.llm_tool(name="get_build_config")
+    @require_permission()
+    async def get_build_config(self, event):
+        '''获取当前构建相关的配置信息，包括内存阈值、内存限制和并发设置。'''
+        memory_threshold = self.config.get("build_memory_threshold", 1536)
+        memory_limit = self.config.get("build_memory_limit", 0)
+        allow_concurrent = self.config.get("allow_build_concurrent", False)
+        
+        config_info = f"[INFO] 当前构建配置:\n"
+        config_info += f"- build_memory_threshold: {memory_threshold} MB（可用内存低于此值时跳过构建）\n"
+        config_info += f"- build_memory_limit: {'不限制' if memory_limit == 0 else f'{memory_limit} MB'}\n"
+        config_info += f"- allow_build_concurrent: {'允许并发构建' if allow_concurrent else '不允许并发构建'}\n"
+        config_info += f"\n[INFO] 提示：构建 Firefly 博客约需 1.5GB 内存，建议将 build_memory_threshold 设置为 1536 或更高"
+        
+        yield config_info
 
     @filter.llm_tool(name="deploy_blog")
+    @require_permission(force_owner=True)
+    @require_build_manager
     async def deploy_blog(self, event):
-        '''部署 Firefly 博客到 Web 服务器。将构建产物部署到配置的 Web 根目录。'''
-        if not self.build_manager:
-            yield "❌ 构建管理器未初始化"
+        '''部署 Firefly 博客到 Web 服务器。将构建产物部署到配置的 Web 根目录。需要主人权限。'''
+        # 检查 dist 目录是否存在
+        blog_root = self.build_manager.blog_root if self.build_manager else self.config.get("local_blog_root", DEFAULT_BLOG_ROOT)
+        dist_path = os.path.join(blog_root, "dist")
+        if self.build_manager and self.build_manager.deploy_mode == DeployMode.REMOTE_BUILD:
+            # 远程模式下，检查远程 dist
+            rc, _, _ = await self.build_manager.remote_executor.run(f"test -d {blog_root}/dist", timeout=5)
+            if rc != 0:
+                yield "[ERROR] 构建产物不存在，请先执行 build_blog"
+                return
+        elif not os.path.exists(dist_path):
+            yield "[ERROR] 构建产物不存在，请先执行 build_blog"
             return
 
         ok, msg = await self.build_manager.deploy()
-        if ok:
-            yield f"✅ {msg}"
-        else:
-            yield f"❌ {msg}"
+        prefix = "[OK]" if ok else "[ERROR]"
+        yield f"{prefix} {msg}"
 
     @filter.llm_tool(name="auto_setup_blog")
+    @require_permission(force_owner=True)
     async def auto_setup_blog(self, event):
         '''智能检测并自动设置 Firefly 博客。自动执行：
         1. 遍历系统查找已克隆的 Firefly 博客仓库
         2. 检查是否已构建
         3. 如果未找到仓库，自动克隆到默认目录
         4. 如果找到但未构建，检查资源后自动构建
-        5. 更新配置文件'''
+        5. 更新配置文件。需要主人权限。'''
+        async for result in self._do_auto_setup():
+            yield result
+
+    async def _do_auto_setup(self):
+        """执行自动设置的内部逻辑（提取出来避免代码重复）"""
         deploy_mode = DeployMode(self.config.get("deploy_mode", "local_build"))
         
         if deploy_mode not in (DeployMode.LOCAL_BUILD, DeployMode.LOCAL_ONLY):
-            yield "❌ 智能设置仅支持 local_build 和 local_only 模式"
+            yield "[ERROR] 智能设置仅支持 local_build 和 local_only 模式"
             return
 
-        yield "🔍 正在搜索系统中的 Firefly 博客仓库..."
+        yield "[INFO] 正在搜索系统中的 Firefly 博客仓库..."
         
         # 查找博客目录
         blog_root, is_built, auto_detected = self._find_local_blog_root()
         
-        if auto_detected:
-            if is_built:
-                yield f"✅ 检测到已构建的博客目录: {blog_root}"
-                yield "📝 更新配置中..."
-                self.config["local_blog_root"] = blog_root
-                yield f"✅ 配置已更新，博客目录: {blog_root}"
-                return
-            else:
-                yield f"⚠️ 检测到博客目录但未构建: {blog_root}"
-                
-                # 检查系统资源
-                yield "📊 检查系统资源..."
-                resources_ok, msg = self._check_system_resources()
-                if not resources_ok:
-                    yield f"❌ {msg}"
-                    yield "建议释放资源后重新执行"
-                    return
-                yield f"✅ {msg}"
-                
-                # 更新配置
-                self.config["local_blog_root"] = blog_root
-                
-                # 重新初始化组件
-                self._init_components()
-                
-                # 自动构建
-                yield "🚀 开始自动构建..."
-                if not self.build_manager:
-                    yield "❌ 构建管理器初始化失败"
-                    return
-                
-                # 安装依赖
-                yield "📦 安装依赖..."
-                ok, msg = await self.build_manager.install_dependencies()
-                if not ok:
-                    yield f"❌ 依赖安装失败: {msg}"
-                    return
-                yield f"✅ {msg}"
-                
-                # 构建
-                yield "🔨 构建博客..."
-                ok, msg = await self.build_manager.build()
-                if ok:
-                    yield f"✅ {msg}"
-                    yield f"🎉 博客设置完成！目录: {blog_root}"
-                else:
-                    yield f"❌ 构建失败: {msg}"
-        else:
-            yield "❌ 未找到已克隆的 Firefly 博客仓库"
-            
-            # 检查系统资源
-            yield "📊 检查系统资源..."
-            resources_ok, msg = self._check_system_resources()
-            if not resources_ok:
-                yield f"❌ {msg}"
-                yield "建议释放资源后重新执行"
-                return
-            yield f"✅ {msg}"
-            
-            # 自动克隆仓库
-            yield f"📥 准备克隆 Firefly 博客到: {blog_root}"
-            if not self.build_manager:
-                # 需要先初始化构建管理器
-                self.local_executor = LocalExecutor()
-                self.build_manager = BuildDeployManager(self.config, self.local_executor)
-            
-            msg = await self.build_manager._clone_blog_repo()
-            if not msg.startswith("✅"):
-                yield msg
-                return
-            yield msg
-            
-            # 更新配置
+        if auto_detected and is_built:
+            yield f"[OK] 检测到已构建的博客目录: {blog_root}"
+            yield "[INFO] 更新配置中..."
             self.config["local_blog_root"] = blog_root
-            
-            # 重新初始化组件
-            self._init_components()
-            
-            # 自动构建
-            yield "🚀 开始自动构建..."
-            
-            # 安装依赖
-            yield "📦 安装依赖..."
-            ok, msg = await self.build_manager.install_dependencies()
-            if not ok:
-                yield f"❌ 依赖安装失败: {msg}"
+            yield f"[OK] 配置已更新，博客目录: {blog_root}"
+            return
+        
+        # 以下两种情况需要构建：
+        # 1. 找到目录但未构建
+        # 2. 未找到目录，需要克隆
+        need_clone = not auto_detected
+        
+        if auto_detected and not is_built:
+            yield f"[WARNING] 检测到博客目录但未构建: {blog_root}"
+        elif need_clone:
+            yield "[ERROR] 未找到已克隆的 Firefly 博客仓库"
+        
+        # 检查系统资源
+        yield "[INFO] 检查系统资源..."
+        resources_ok, msg = self._check_system_resources()
+        if not resources_ok:
+            yield f"[ERROR] {msg}"
+            yield "[INFO] 建议释放资源后重新执行"
+            return
+        yield f"[OK] {msg}"
+        
+        # 更新配置
+        self.config["local_blog_root"] = blog_root
+        
+        # 确保构建管理器已初始化
+        if not self.build_manager:
+            self.local_executor = LocalExecutor()
+            self.build_manager = BuildDeployManager(self.config, self.local_executor)
+        
+        # 重新初始化组件
+        self._init_components()
+        
+        # 如果需要克隆仓库
+        if need_clone:
+            yield f"[INFO] 准备克隆 Firefly 博客到: {blog_root}"
+            clone_msg = await self.build_manager._clone_blog_repo()
+            yield clone_msg
+            if not clone_msg.startswith("[OK]"):
                 return
-            yield f"✅ {msg}"
-            
-            # 构建
-            yield "🔨 构建博客..."
-            ok, msg = await self.build_manager.build()
-            if ok:
-                yield f"✅ {msg}"
-                yield f"🎉 博客设置完成！目录: {blog_root}"
-            else:
-                yield f"❌ 构建失败: {msg}"
+            self._init_components()
+        
+        # 执行安装依赖和构建
+        yield "[INFO] 开始自动构建..."
+        if not self.build_manager:
+            yield "[ERROR] 构建管理器初始化失败"
+            return
+        
+        yield "[INFO] 安装依赖..."
+        ok, msg = await self.build_manager.install_dependencies()
+        if not ok:
+            yield f"[ERROR] 依赖安装失败: {msg}"
+            return
+        yield f"[OK] {msg}"
+        
+        yield "[INFO] 构建博客..."
+        ok, msg = await self.build_manager.build()
+        if ok:
+            yield f"[OK] {msg}"
+            yield f"[OK] 博客设置完成！目录: {blog_root}"
+        else:
+            yield f"[ERROR] 构建失败: {msg}"
 
     @filter.llm_tool(name="build_and_deploy_blog")
+    @require_permission(force_owner=True)
+    @require_build_manager
     async def build_and_deploy(self, event):
-        '''一键构建并部署 Firefly 博客。自动执行：检查环境 -> 安装依赖 -> 构建 -> 部署。'''
-        if not self.build_manager:
-            yield "❌ 构建管理器未初始化"
-            return
-
+        '''一键构建并部署 Firefly 博客。自动执行：检查环境 -> 安装依赖 -> 构建 -> 部署。需要主人权限。'''
         results = []
+
+        # 检查资源
+        resources_ok, resources_msg = self._check_system_resources()
+        if not resources_ok:
+            yield f"[ERROR] 资源检查失败: {resources_msg}"
+            return
+        results.append(f"[OK] 资源检查: {resources_msg}")
 
         # 检查环境
         ok, msg = await self.build_manager.check_environment()
         if not ok:
-            yield f"❌ 环境检查失败: {msg}"
+            yield f"[ERROR] 环境检查失败: {msg}"
             return
-        results.append(f"✅ 环境检查: {msg}")
+        results.append(f"[OK] 环境检查: {msg}")
 
         # 检查依赖，未安装则自动安装
         if not await self.build_manager.check_dependencies_installed():
             ok, msg = await self.build_manager.install_dependencies()
             if not ok:
-                yield f"❌ 依赖安装失败\n{msg}"
+                yield f"[ERROR] 依赖安装失败\n{msg}"
                 return
-            results.append(f"✅ 依赖安装: {msg}")
+            results.append(f"[OK] 依赖安装: {msg}")
 
         # 构建
         ok, msg = await self.build_manager.build()
         if not ok:
-            yield f"❌ 构建失败: {msg}"
+            yield f"[ERROR] 构建失败: {msg}"
             return
-        results.append(f"✅ 构建: {msg}")
+        results.append(f"[OK] 构建: {msg}")
 
         # 部署
         ok, msg = await self.build_manager.deploy()
         if not ok:
-            yield f"❌ 部署失败: {msg}"
+            yield f"[ERROR] 部署失败: {msg}"
             return
-        results.append(f"✅ 部署: {msg}")
+        results.append(f"[OK] 部署: {msg}")
 
         yield "\n".join(results)
+
+    # ========================================================================
+    # 投稿管理 LLM 工具
+    # ========================================================================
+
+    @filter.llm_tool(name="submit_post_draft")
+    async def submit_post_draft(
+        self,
+        event,
+        title: str,
+        content: str,
+        author_name: str = "",
+        author_email: str = "",
+        tags: str = "",
+        category: str = "",
+        description: str = "",
+    ):
+        '''提交一篇文章草稿到博客。投稿不会立即发布，需要主人审核后才能发布。
+        
+        任何人都可以使用此功能提交投稿，无需权限验证。
+        
+        Args:
+            title(string): 文章标题
+            content(string): 文章正文内容（Markdown 格式）
+            author_name(string): 作者姓名
+            author_email(string): 作者邮箱
+            tags(string): 文章标签，多个标签用逗号分隔
+            category(string): 文章分类
+            description(string): 文章描述/摘要
+        '''
+        import uuid
+        
+        submission_id = str(uuid.uuid4())[:8]
+        submit_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        
+        user_id = (
+            getattr(event, 'user_id', None) or
+            getattr(event, 'sender_id', None) or
+            getattr(event, 'from_id', None) or
+            getattr(event, 'user_id_holder', None)
+        )
+        if user_id is not None:
+            user_id = str(user_id)
+        
+        submission = {
+            "id": submission_id,
+            "title": title,
+            "content": content,
+            "author_name": author_name,
+            "author_email": author_email,
+            "tags": tags,
+            "category": category,
+            "description": description,
+            "submit_time": submit_time,
+            "user_id": user_id,
+            "status": "pending",
+        }
+        
+        self._submissions_cache[submission_id] = submission
+        
+        # 持久化保存
+        if self._save_submissions():
+            yield f"[OK] 投稿成功\n\n投稿 ID: {submission_id}\n标题: {title}\n作者: {author_name or '匿名'}\n提交时间: {submit_time}\n\n您的投稿已保存，等待主人审核。主人审核通过后，文章将正式发布到博客"
+        else:
+            yield f"[WARNING] 投稿已保存到内存，但文件保存失败。插件重启后投稿可能丢失\n\n投稿 ID: {submission_id}\n标题: {title}\n作者: {author_name or '匿名'}\n提交时间: {submit_time}"
+
+    @filter.llm_tool(name="list_post_submissions")
+    @require_permission(force_owner=True)
+    async def list_post_submissions(self, event):
+        '''列出所有待审核的文章投稿。需要主人权限。'''
+        if not self._submissions_cache:
+            yield "[INFO] 暂无待审核的投稿"
+            return
+
+        submissions = sorted(
+            self._submissions_cache.values(),
+            key=lambda x: x["submit_time"],
+            reverse=True
+        )
+
+        result = "[INFO] 待审核投稿列表:\n\n"
+        for sub in submissions:
+            status_str = {
+                "pending": "[PENDING]",
+                "approved": "[APPROVED]",
+                "rejected": "[REJECTED]"
+            }.get(sub["status"], "[UNKNOWN]")
+            
+            result += f"{status_str} {sub['title']}\n"
+            result += f"   - 投稿 ID: {sub['id']}\n"
+            result += f"   - 作者: {sub['author_name'] or '匿名'}\n"
+            result += f"   - 提交时间: {sub['submit_time']}\n"
+            result += f"   - 状态: {'待审核' if sub['status'] == 'pending' else '已批准' if sub['status'] == 'approved' else '已拒绝'}\n"
+            result += "\n"
+
+        yield result
+
+    @filter.llm_tool(name="review_submission")
+    @require_permission(force_owner=True)
+    async def review_submission(self, event, submission_id: str):
+        '''查看指定投稿的详细内容。需要主人权限。
+        
+        Args:
+            submission_id(string): 投稿 ID
+        '''
+        submission = self._submissions_cache.get(submission_id)
+        if not submission:
+            yield f"[ERROR] 未找到投稿 ID: {submission_id}"
+            return
+
+        result = f"[INFO] 投稿详情 (ID: {submission_id})\n\n"
+        result += f"标题: {submission['title']}\n"
+        result += f"作者: {submission['author_name'] or '匿名'}\n"
+        result += f"邮箱: {submission['author_email'] or '未提供'}\n"
+        result += f"提交时间: {submission['submit_time']}\n"
+        result += f"状态: {'待审核' if submission['status'] == 'pending' else '已批准' if submission['status'] == 'approved' else '已拒绝'}\n"
+        result += f"分类: {submission['category'] or '未设置'}\n"
+        result += f"标签: {submission['tags'] or '未设置'}\n"
+        result += f"描述: {submission['description'] or '未设置'}\n"
+        result += f"\n正文内容:\n\n{submission['content']}\n"
+
+        yield result
+
+    @filter.llm_tool(name="approve_submission")
+    @require_permission(force_owner=True)
+    @require_blog_manager
+    async def approve_submission(self, event, submission_id: str):
+        '''批准指定投稿，将其发布到博客。需要主人权限。
+        
+        Args:
+            submission_id(string): 投稿 ID
+        '''
+        submission = self._submissions_cache.get(submission_id)
+        if not submission:
+            yield f"[ERROR] 未找到投稿 ID: {submission_id}"
+            return
+
+        if submission["status"] != "pending":
+            status_text = {"pending": "待审核", "approved": "已批准", "rejected": "已拒绝"}.get(
+                submission["status"], submission["status"]
+            )
+            yield f"[ERROR] 投稿状态错误，当前状态: {status_text}"
+            return
+
+        tag_list = [t.strip() for t in submission["tags"].split(",") if t.strip()]
+        extra: dict = {}
+        if submission["category"]:
+            extra["category"] = submission["category"]
+        if submission["description"]:
+            extra["description"] = submission["description"]
+        if submission["author_name"]:
+            extra["author"] = submission["author_name"]
+
+        filename = FilenameUtil.resolve(submission["title"])
+
+        if await self.blog_manager.exists(filename):
+            yield f"[ERROR] 文章《{submission['title']}》已存在，无法发布"
+            return
+
+        metadata = PostMetadata(
+            title=submission["title"],
+            tags=tag_list,
+            **extra
+        )
+
+        full_content = metadata.to_yaml() + "\n" + submission["content"]
+
+        if await self.blog_manager.write_post(filename, full_content):
+            submission["status"] = "approved"
+            self._save_submissions()
+            yield f"[OK] 投稿《{submission['title']}》已批准并发布\n\n提示：需要重新构建部署才能在网站上显示"
+        else:
+            yield f"[ERROR] 发布投稿《{submission['title']}》失败"
+
+    @filter.llm_tool(name="reject_submission")
+    @require_permission(force_owner=True)
+    async def reject_submission(self, event, submission_id: str, reason: str = ""):
+        '''拒绝指定投稿。需要主人权限。
+        
+        Args:
+            submission_id(string): 投稿 ID
+            reason(string): 拒绝原因（可选）
+        '''
+        submission = self._submissions_cache.get(submission_id)
+        if not submission:
+            yield f"[ERROR] 未找到投稿 ID: {submission_id}"
+            return
+
+        if submission["status"] != "pending":
+            status_text = {"pending": "待审核", "approved": "已批准", "rejected": "已拒绝"}.get(
+                submission["status"], submission["status"]
+            )
+            yield f"[ERROR] 投稿状态错误，当前状态: {status_text}"
+            return
+
+        submission["status"] = "rejected"
+        submission["reject_reason"] = reason
+        self._save_submissions()
+
+        result = f"[INFO] 投稿《{submission['title']}》已拒绝\n"
+        if reason:
+            result += f"拒绝原因: {reason}\n"
+        result += "\n提示：该投稿仍保留在列表中，可稍后重新审核"
+
+        yield result
+
+    # ========================================================================
+    # 显式指令注册（用户可直接使用的命令）
+    # ========================================================================
+
+    @filter.command("博客列表", alias=["博客文章", "列出文章"], priority=5)
+    @require_permission()
+    @require_blog_manager
+    async def cmd_list_posts(self, event):
+        """列出所有博客文章"""
+        posts = await self.blog_manager.list_posts()
+        yield event.plain_result(self._format_post_list(posts))
+
+    @filter.command("博客搜索", alias=["搜索文章"], priority=5)
+    @require_permission()
+    @require_blog_manager
+    async def cmd_search_posts(self, event, keyword: str):
+        """搜索博客文章"""
+        posts = await self.blog_manager.list_posts()
+        results = []
+        keyword_lower = keyword.lower()
+        for post in posts:
+            if keyword_lower in post.title.lower() or keyword_lower in post.category.lower() or any(keyword_lower in tag.lower() for tag in post.tags):
+                results.append(post)
+        if not results:
+            yield event.plain_result(f"[INFO] 未找到包含「{keyword}」的文章")
+        else:
+            yield event.plain_result(self._format_post_list(results))
+
+    @filter.command("博客环境", alias=["检查环境"], priority=5)
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @require_permission(force_owner=True)
+    @require_build_manager
+    async def cmd_check_env(self, event):
+        """检查博客构建环境（仅管理员可用）"""
+        ok, msg = await self.build_manager.check_environment()
+        prefix = "[OK]" if ok else "[ERROR]"
+        yield event.plain_result(f"{prefix} {msg}")
+
+    @filter.command("博客构建", alias=["构建博客"], priority=10)
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @require_permission(force_owner=True)
+    @require_build_manager
+    async def cmd_build_blog(self, event):
+        """构建博客（仅管理员可用）"""
+        ok, msg = await self.build_manager.build()
+        prefix = "[OK]" if ok else "[ERROR]"
+        yield event.plain_result(f"{prefix} {msg}")
+
+    @filter.command("博客部署", alias=["部署博客"], priority=10)
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @require_permission(force_owner=True)
+    @require_build_manager
+    async def cmd_deploy_blog(self, event):
+        """部署博客到服务器（仅管理员可用）"""
+        ok, msg = await self.build_manager.deploy()
+        prefix = "[OK]" if ok else "[ERROR]"
+        yield event.plain_result(f"{prefix} {msg}")
+
+    @filter.command("博客投稿列表", alias=["投稿列表", "待审核投稿"], priority=5)
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @require_permission(force_owner=True)
+    async def cmd_list_submissions(self, event):
+        """查看投稿列表（仅管理员可用）"""
+        if not self._submissions_cache:
+            yield event.plain_result("[INFO] 暂无待审核的投稿")
+            return
+        submissions = sorted(self._submissions_cache.values(), key=lambda x: x["submit_time"], reverse=True)
+        result = "[INFO] 投稿列表:\n"
+        for sub in submissions:
+            status_map = {"pending": "[PENDING]", "approved": "[APPROVED]", "rejected": "[REJECTED]"}
+            status_str = status_map.get(sub["status"], "[UNKNOWN]")
+            author = sub["author_name"] or "匿名"
+            result += f"{status_str} {sub['title']} - {author} - {sub['submit_time']}\n"
+        yield event.plain_result(result)
+
+    @filter.command("内存状态", alias=["检查内存"], priority=5)
+    @require_permission()
+    async def cmd_memory_status(self, event):
+        """检查当前内存状态（公开命令）"""
+        ok, msg = self._check_memory_status()
+        yield event.plain_result(msg)
 
     # ========================================================================
     # 生命周期管理
     # ========================================================================
 
     async def terminate(self):
-        """插件卸载/停用时清理资源（关闭 SSH 连接等）"""
+        """插件卸载/停用时清理资源"""
+        # 保存投稿缓存
+        if self._submissions_cache:
+            self._save_submissions()
+            logger.info(f"[Firefly] 已保存 {len(self._submissions_cache)} 条投稿数据")
+        
+        # 关闭 SSH 连接
         if self.remote_executor:
-            await self.remote_executor.close()
-            self.remote_executor = None
+            try:
+                await self.remote_executor.close()
+            except Exception as e:
+                logger.error(f"[Firefly] 关闭 SSH 连接失败: {e}")
+            finally:
+                self.remote_executor = None
+        
         logger.info("[Firefly] 插件资源已清理")
