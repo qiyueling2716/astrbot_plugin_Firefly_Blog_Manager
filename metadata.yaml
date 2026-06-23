@@ -3,7 +3,7 @@ display_name: Firefly 博客管理
 short_desc: 用自然语言指令管理 Firefly 博客的文章与部署
 desc: 将 Firefly 博客的日常操作封装为 AstrBot AI Agent 可调用的工具。
 author: 月凌
-version: 1.3.4
+version: 1.3.5
 repo: https://github.com/qiyueling2716/astrbot_plugin_Firefly_Blog_Manager
 support_platforms: []
 astrbot_version: ">=4.16"

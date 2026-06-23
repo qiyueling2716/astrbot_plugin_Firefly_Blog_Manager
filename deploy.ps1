@@ -1,4 +1,4 @@
-﻿#requires -Version 5.1
+﻿﻿#requires -Version 5.1
 
 # =============================================================================
 # AstrBot Firefly Blog Manager - PowerShell 部署脚本

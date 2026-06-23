@@ -1264,28 +1264,26 @@ class FilenameUtil:
 # 装饰器定义
 # ============================================================================
 
-def require_permission(force_owner: bool = False):
-    """权限检查装饰器"""
-    def decorator(func):
-        @functools.wraps(func)
-        async def wrapper(self, event, *args, **kwargs):
-            ok, msg = self._check_permission(event, force_owner=force_owner)
-            if not ok:
-                yield msg
-                return
-            
-            result = func(self, event, *args, **kwargs)
-            # 兼容同步返回值、异步生成器和同步生成器
-            if hasattr(result, '__aiter__'):
-                async for item in result:
-                    yield item
-            elif hasattr(result, '__iter__'):
-                for item in result:
-                    yield item
-            elif result is not None:
-                yield result
-        return wrapper
-    return decorator
+def require_admin(func):
+    """管理员权限检查装饰器 - 使用 UMO 判定"""
+    @functools.wraps(func)
+    async def wrapper(self, event, *args, **kwargs):
+        ok, msg = self._check_admin_permission(event)
+        if not ok:
+            yield msg
+            return
+        
+        result = func(self, event, *args, **kwargs)
+        # 兼容同步返回值、异步生成器和同步生成器
+        if hasattr(result, '__aiter__'):
+            async for item in result:
+                yield item
+        elif hasattr(result, '__iter__'):
+            for item in result:
+                yield item
+        elif result is not None:
+            yield result
+    return wrapper
 
 def require_blog_manager(func):
     """博客管理器检查装饰器"""
@@ -1335,7 +1333,7 @@ def require_build_manager(func):
     "astrbot_plugin_Firefly_Blog_Manager",
     "月凌",
     "通过 AI 指令管理 Firefly 博客文章和部署",
-    "1.3.4",
+    "1.3.5",
     "https://github.com/qiyueling2716/astrbot_plugin_Firefly_Blog_Manager",
 )
 class FireflyBlogManager(Star):
@@ -1382,178 +1380,84 @@ class FireflyBlogManager(Star):
             logger.error(f"[Firefly] 保存投稿缓存失败: {e}")
             return False
 
-    def _get_user_id(self, event) -> Optional[str]:
-        """从事件对象中获取用户 ID
+    def _get_umo(self, event) -> Optional[str]:
+        """从事件对象中获取统一消息来源标识（UMO）
         
-        支持多种事件对象类型，兼容不同平台适配器的用户 ID 字段命名：
-        - user_id: 标准字段
-        - sender_id: 发送者 ID
-        - from_id: 来源 ID
-        - user_id_holder: 用户 ID 持有者
-        - uid: 用户唯一标识
-        - sender: 发送者对象（可能包含 id 属性）
-        - from_user: 来源用户对象（可能包含 id 属性）
+        UMO 格式通常为 platform:user_id，是 AstrBot 中唯一标识会话的标准方式。
+        根据 skill-astrbot-dev 文档，event.unified_msg_origin 是标准字段。
         """
-        # 尝试直接获取用户 ID
+        # 优先从 event 获取 UMO（AstrBot 官方标准）
+        umo = getattr(event, 'unified_msg_origin', None)
+        if umo:
+            return str(umo)
+        
+        # 尝试从 event.umo 获取（某些平台适配器可能使用此字段）
+        umo = getattr(event, 'umo', None)
+        if umo:
+            return str(umo)
+        
+        # 尝试从其他常见字段构建 UMO
+        # UMO 格式通常为: platform:user_id
+        platform = getattr(event, 'platform_id', None) or getattr(event, 'platform', None)
         user_id = getattr(event, 'user_id', None)
-        if user_id is None:
-            user_id = getattr(event, 'sender_id', None)
-        if user_id is None:
-            user_id = getattr(event, 'from_id', None)
-        if user_id is None:
-            user_id = getattr(event, 'user_id_holder', None)
-        if user_id is None:
-            user_id = getattr(event, 'uid', None)
         
-        # 尝试从发送者对象获取
-        if user_id is None:
-            sender = getattr(event, 'sender', None)
-            if sender:
-                user_id = getattr(sender, 'id', None)
+        if platform and user_id:
+            return f"{platform}:{user_id}"
         
-        # 尝试从来源用户对象获取
-        if user_id is None:
-            from_user = getattr(event, 'from_user', None)
-            if from_user:
-                user_id = getattr(from_user, 'id', None)
+        # 尝试从 sender 获取用户 ID 并构建 UMO
+        sender = getattr(event, 'sender', None)
+        if sender:
+            user_id = getattr(sender, 'user_id', None) or getattr(sender, 'id', None)
+            if platform and user_id:
+                return f"{platform}:{user_id}"
         
-        # 尝试从消息链对象获取
-        if user_id is None:
-            message_chain = getattr(event, 'message_chain', None)
-            if message_chain:
-                # 遍历消息链寻找 At 元素或来源信息
-                try:
-                    for segment in message_chain:
-                        if hasattr(segment, 'type') and segment.type == 'At':
-                            user_id = getattr(segment, 'target', None)
-                            if user_id:
-                                break
-                except Exception:
-                    pass
-        
-        if user_id is not None:
-            return str(user_id)
         return None
 
-    def _is_admin(self, event) -> bool:
-        """检查用户是否是 AstrBot 管理员（复用框架权限系统）
-        
-        优先使用框架提供的权限检查方法：
-        1. event.is_admin(user_id) - 框架标准方法（需要传入 user_id）
-        2. event.is_owner(user_id) - 检查是否是主人（需要传入 user_id）
-        3. context.is_admin(user_id) - 通过 context 检查
-        4. context.is_owner(user_id) - 通过 context 检查主人
-        """
-        user_id = self._get_user_id(event)
-        if not user_id:
-            return False
-        
-        # 1. 优先使用 event 对象的权限检查方法（传入 user_id 参数）
-        if hasattr(event, 'is_admin') and callable(event.is_admin):
-            try:
-                # 尝试带参数调用
-                result = event.is_admin(user_id)
-                if isinstance(result, bool):
-                    return result
-            except TypeError:
-                # 如果不接受参数，尝试无参调用
-                try:
-                    result = event.is_admin()
-                    if isinstance(result, bool):
-                        return result
-                except Exception:
-                    pass
-            except Exception:
-                pass
-        
-        # 2. 检查是否是主人（传入 user_id 参数）
-        if hasattr(event, 'is_owner') and callable(event.is_owner):
-            try:
-                # 尝试带参数调用
-                result = event.is_owner(user_id)
-                if isinstance(result, bool):
-                    return result
-            except TypeError:
-                # 如果不接受参数，尝试无参调用
-                try:
-                    result = event.is_owner()
-                    if isinstance(result, bool):
-                        return result
-                except Exception:
-                    pass
-            except Exception:
-                pass
-        
-        # 3. 通过 context 检查
-        if hasattr(self.context, 'is_admin') and callable(self.context.is_admin):
-            try:
-                return self.context.is_admin(user_id)
-            except Exception:
-                pass
-        
-        # 4. 检查是否是主人（通过 context）
-        if hasattr(self.context, 'is_owner') and callable(self.context.is_owner):
-            try:
-                return self.context.is_owner(user_id)
-            except Exception:
-                pass
-        
-        # 5. 回退到配置文件检查（兼容旧版本框架）
-        return self._is_admin_from_config(user_id)
-
-    def _is_admin_from_config(self, user_id: str) -> bool:
-        """从配置文件检查用户是否是管理员（兼容旧版本框架）"""
-        admin_ids = set()
-        
-        # 1. 插件配置中的 admin_users（列表）
-        plugin_admins = self.config.get("admin_users", [])
-        if isinstance(plugin_admins, list):
-            for uid in plugin_admins:
-                if uid:
-                    admin_ids.add(str(uid))
-        
-        # 2. 插件配置中的 owner_user_id（单个）
-        owner_user_id = self.config.get("owner_user_id", "")
-        if owner_user_id:
-            admin_ids.add(str(owner_user_id))
-        
-        # 3. AstrBot 全局配置中的 owner_id（单个）
-        if hasattr(self.context, 'config') and hasattr(self.context.config, 'owner_id'):
-            global_owner = self.context.config.owner_id
-            if global_owner:
-                admin_ids.add(str(global_owner))
-        
-        # 4. AstrBot 全局配置中的管理员列表
-        if hasattr(self.context, 'config') and hasattr(self.context.config, 'admin_users') and self.context.config.admin_users:
-            for uid in self.context.config.admin_users:
-                if uid:
-                    admin_ids.add(str(uid))
-        
-        return user_id in admin_ids
-
-    def _check_permission(self, event, force_owner: bool = False) -> tuple[bool, str]:
-        """检查用户是否有权限使用插件
+    def _check_admin_permission(self, event) -> tuple[bool, str]:
+        """检查用户是否有管理员权限（使用 UMO 判定）
         
         Args:
-            event: 事件对象，包含用户信息
-            force_owner: 是否强制要求主人/管理员权限（构建等危险操作使用）
+            event: 事件对象，包含 UMO 信息
         
         返回: (是否有权限, 错误消息或空字符串)
+        
+        支持两种配置格式：
+        1. 完整 UMO 格式：platform:user_id（如 onebot:123456789）
+        2. 仅用户 ID：纯数字（如 123456789），会自动匹配任意平台
         """
-        allow_only_owner = self.config.get("allow_only_owner", False)
+        admin_umo = self.config.get("admin_umo", "").strip()
         
-        if force_owner or allow_only_owner:
-            user_id = self._get_user_id(event)
-            
-            if not user_id:
-                return False, "[ERROR] 无法获取用户 ID，无法验证权限"
-            
-            if not self._is_admin(event):
-                if force_owner:
-                    return False, f"[ERROR] 构建操作仅允许管理员使用。当前用户 ID: {user_id}"
-                return False, f"[ERROR] 权限不足：此插件仅允许管理员使用。当前用户 ID: {user_id}"
+        # 如果未配置管理员 UMO，允许所有操作（方便调试）
+        if not admin_umo:
+            return True, ""
         
-        return True, ""
+        # 获取当前用户的 UMO
+        current_umo = self._get_umo(event)
+        
+        if not current_umo:
+            return False, "[ERROR] 无法获取用户标识（UMO），无法验证权限"
+        
+        # 比较 UMO
+        # 支持两种匹配方式：
+        # 1. 完整匹配：admin_umo 是完整格式（包含冒号）
+        # 2. 仅用户 ID 匹配：admin_umo 是纯数字，只匹配 user_id 部分
+        if ':' in admin_umo:
+            # 完整格式，需要完全匹配
+            if current_umo == admin_umo:
+                return True, ""
+        else:
+            # 仅用户 ID 格式，匹配任意平台的该用户
+            # current_umo 格式为 platform:user_id，提取 user_id 部分
+            if ':' in current_umo:
+                current_user_id = current_umo.split(':')[1]
+                if current_user_id == admin_umo:
+                    return True, ""
+            else:
+                # 如果 current_umo 也没有冒号，直接比较
+                if current_umo == admin_umo:
+                    return True, ""
+        
+        return False, f"[ERROR] 权限不足：此操作仅允许管理员使用。当前用户: {current_umo}"
 
     def _is_firefly_blog(self, path: str) -> bool:
         """检查路径是否为 Firefly 博客项目"""
@@ -1787,7 +1691,7 @@ class FireflyBlogManager(Star):
     # ========================================================================
 
     @filter.llm_tool(name="create_blog_post")
-    @require_permission()
+    @require_admin
     @require_blog_manager
     async def create_post(
         self,
@@ -1857,7 +1761,7 @@ class FireflyBlogManager(Star):
             yield f"[ERROR] 创建文章《{title}》失败"
 
     @filter.llm_tool(name="delete_blog_post")
-    @require_permission()
+    @require_admin
     @require_blog_manager
     async def delete_post(self, event, title: str):
         '''删除 Firefly 博客上的一篇文章。
@@ -1877,7 +1781,6 @@ class FireflyBlogManager(Star):
             yield f"[ERROR] 删除文章《{title}》失败"
 
     @filter.llm_tool(name="list_blog_posts")
-    @require_permission()
     @require_blog_manager
     async def list_posts(self, event):
         '''列出 Firefly 博客上的所有文章。'''
@@ -1885,7 +1788,6 @@ class FireflyBlogManager(Star):
         yield self._format_post_list(posts)
 
     @filter.llm_tool(name="get_blog_post")
-    @require_permission()
     @require_blog_manager
     async def get_post(self, event, title: str):
         '''获取 Firefly 博客上指定文章的完整内容。
@@ -1908,7 +1810,7 @@ class FireflyBlogManager(Star):
         yield f"[INFO] 文章《{title}》内容:\n\n{content}"
 
     @filter.llm_tool(name="update_blog_post")
-    @require_permission()
+    @require_admin
     @require_blog_manager
     async def update_post(
         self,
@@ -2021,7 +1923,6 @@ class FireflyBlogManager(Star):
             yield f"[ERROR] 更新文章《{metadata.title}》失败"
 
     @filter.llm_tool(name="search_blog_posts")
-    @require_permission()
     @require_blog_manager
     async def search_posts(self, event, keyword: str):
         '''在 Firefly 博客中搜索文章。
@@ -2050,7 +1951,6 @@ class FireflyBlogManager(Star):
     # ========================================================================
 
     @filter.llm_tool(name="check_blog_environment")
-    @require_permission()
     @require_build_manager
     async def check_environment(self, event):
         '''检查 Firefly 博客的构建环境是否就绪（Node.js 和 pnpm）。'''
@@ -2059,7 +1959,7 @@ class FireflyBlogManager(Star):
         yield f"{prefix} {msg}"
 
     @filter.llm_tool(name="install_blog_dependencies")
-    @require_permission(force_owner=True)
+    @require_admin
     @require_build_manager
     async def install_dependencies(self, event):
         '''安装 Firefly 博客的依赖（执行 pnpm install）。需要主人权限。'''
@@ -2069,7 +1969,7 @@ class FireflyBlogManager(Star):
         yield f"{prefix} {msg}"
 
     @filter.llm_tool(name="build_blog")
-    @require_permission(force_owner=True)
+    @require_admin
     @require_build_manager
     async def build_blog(self, event):
         '''构建 Firefly 博客（执行 pnpm build）。构建可能需要较长时间，占用约 1.5GB 内存。需要主人权限。'''
@@ -2099,7 +1999,6 @@ class FireflyBlogManager(Star):
             yield f"[ERROR] {msg}"
 
     @filter.llm_tool(name="check_memory_status")
-    @require_permission()
     async def check_memory_status(self, event):
         '''检查当前系统内存状态，判断是否满足构建条件。
         
@@ -2109,7 +2008,6 @@ class FireflyBlogManager(Star):
         yield msg
 
     @filter.llm_tool(name="check_build_resource")
-    @require_permission()
     async def check_build_resource(self, event):
         '''检查构建博客所需的资源是否充足（磁盘空间和内存）。
         
@@ -2120,7 +2018,6 @@ class FireflyBlogManager(Star):
         yield f"{prefix} {msg}"
 
     @filter.llm_tool(name="get_build_config")
-    @require_permission()
     async def get_build_config(self, event):
         '''获取当前构建相关的配置信息，包括内存阈值、内存限制和并发设置。'''
         memory_threshold = self.config.get("build_memory_threshold", 1536)
@@ -2136,7 +2033,7 @@ class FireflyBlogManager(Star):
         yield config_info
 
     @filter.llm_tool(name="deploy_blog")
-    @require_permission(force_owner=True)
+    @require_admin
     @require_build_manager
     async def deploy_blog(self, event):
         '''部署 Firefly 博客到 Web 服务器。将构建产物部署到配置的 Web 根目录。需要主人权限。'''
@@ -2158,7 +2055,7 @@ class FireflyBlogManager(Star):
         yield f"{prefix} {msg}"
 
     @filter.llm_tool(name="auto_setup_blog")
-    @require_permission(force_owner=True)
+    @require_admin
     async def auto_setup_blog(self, event):
         '''智能检测并自动设置 Firefly 博客。自动执行：
         1. 遍历系统查找已克隆的 Firefly 博客仓库
@@ -2250,7 +2147,7 @@ class FireflyBlogManager(Star):
             yield f"[ERROR] 构建失败: {msg}"
 
     @filter.llm_tool(name="build_and_deploy_blog")
-    @require_permission(force_owner=True)
+    @require_admin
     @require_build_manager
     async def build_and_deploy(self, event):
         '''一键构建并部署 Firefly 博客。自动执行：检查环境 -> 安装依赖 -> 构建 -> 部署。需要主人权限。'''
@@ -2360,7 +2257,7 @@ class FireflyBlogManager(Star):
             yield f"[WARNING] 投稿已保存到内存，但文件保存失败。插件重启后投稿可能丢失\n\n投稿 ID: {submission_id}\n标题: {title}\n作者: {author_name or '匿名'}\n提交时间: {submit_time}"
 
     @filter.llm_tool(name="list_post_submissions")
-    @require_permission(force_owner=True)
+    @require_admin
     async def list_post_submissions(self, event):
         '''列出所有待审核的文章投稿。需要主人权限。'''
         if not self._submissions_cache:
@@ -2391,7 +2288,7 @@ class FireflyBlogManager(Star):
         yield result
 
     @filter.llm_tool(name="review_submission")
-    @require_permission(force_owner=True)
+    @require_admin
     async def review_submission(self, event, submission_id: str):
         '''查看指定投稿的详细内容。需要主人权限。
         
@@ -2417,7 +2314,7 @@ class FireflyBlogManager(Star):
         yield result
 
     @filter.llm_tool(name="approve_submission")
-    @require_permission(force_owner=True)
+    @require_admin
     @require_blog_manager
     async def approve_submission(self, event, submission_id: str):
         '''批准指定投稿，将其发布到博客。需要主人权限。
@@ -2468,7 +2365,7 @@ class FireflyBlogManager(Star):
             yield f"[ERROR] 发布投稿《{submission['title']}》失败"
 
     @filter.llm_tool(name="reject_submission")
-    @require_permission(force_owner=True)
+    @require_admin
     async def reject_submission(self, event, submission_id: str, reason: str = ""):
         '''拒绝指定投稿。需要主人权限。
         
@@ -2504,7 +2401,6 @@ class FireflyBlogManager(Star):
     # ========================================================================
 
     @filter.command("博客列表", alias=["博客文章", "列出文章"], priority=5)
-    @require_permission()
     @require_blog_manager
     async def cmd_list_posts(self, event):
         """列出所有博客文章"""
@@ -2512,7 +2408,6 @@ class FireflyBlogManager(Star):
         yield event.plain_result(self._format_post_list(posts))
 
     @filter.command("博客搜索", alias=["搜索文章"], priority=5)
-    @require_permission()
     @require_blog_manager
     async def cmd_search_posts(self, event, keyword: str):
         """搜索博客文章"""
@@ -2528,16 +2423,15 @@ class FireflyBlogManager(Star):
             yield event.plain_result(self._format_post_list(results))
 
     @filter.command("博客环境", alias=["检查环境"], priority=5)
-    @require_permission(force_owner=True)
     @require_build_manager
     async def cmd_check_env(self, event):
-        """检查博客构建环境（仅管理员可用）"""
+        """检查博客构建环境"""
         ok, msg = await self.build_manager.check_environment()
         prefix = "[OK]" if ok else "[ERROR]"
         yield event.plain_result(f"{prefix} {msg}")
 
     @filter.command("博客构建", alias=["构建博客"], priority=10)
-    @require_permission(force_owner=True)
+    @require_admin
     @require_build_manager
     async def cmd_build_blog(self, event):
         """构建博客（仅管理员可用）"""
@@ -2546,7 +2440,7 @@ class FireflyBlogManager(Star):
         yield event.plain_result(f"{prefix} {msg}")
 
     @filter.command("博客部署", alias=["部署博客"], priority=10)
-    @require_permission(force_owner=True)
+    @require_admin
     @require_build_manager
     async def cmd_deploy_blog(self, event):
         """部署博客到服务器（仅管理员可用）"""
@@ -2555,7 +2449,7 @@ class FireflyBlogManager(Star):
         yield event.plain_result(f"{prefix} {msg}")
 
     @filter.command("博客投稿列表", alias=["投稿列表", "待审核投稿"], priority=5)
-    @require_permission(force_owner=True)
+    @require_admin
     async def cmd_list_submissions(self, event):
         """查看投稿列表（仅管理员可用）"""
         if not self._submissions_cache:
@@ -2571,7 +2465,7 @@ class FireflyBlogManager(Star):
         yield event.plain_result(result)
 
     @filter.command("内存状态", alias=["检查内存"], priority=5)
-    @require_permission()
+    @require_admin
     async def cmd_memory_status(self, event):
         """检查当前内存状态（公开命令）"""
         ok, msg = self._check_memory_status()

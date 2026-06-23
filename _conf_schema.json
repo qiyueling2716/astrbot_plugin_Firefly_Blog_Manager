@@ -67,22 +67,9 @@
     "description": "是否允许并发构建。设置为 false 时，同一时间只允许一个构建任务执行，避免内存竞争",
     "default": false
   },
-  "allow_only_owner": {
-    "type": "bool",
-    "description": "是否只允许管理员使用非构建类工具（文章管理、投稿等）。设置为 true 时，非管理员用户只能使用 submit_post_draft（投稿）工具，其他工具会被拒绝。注意：构建相关工具始终只能由管理员使用，不受此配置影响",
-    "default": false
-  },
-  "owner_user_id": {
+  "admin_umo": {
     "type": "string",
-    "description": "主人用户 ID（回退配置）。插件优先使用 AstrBot 框架的管理员系统，当框架方法不可用时，使用此配置作为回退。留空则自动使用 AstrBot 配置的主人 ID",
+    "description": "管理员的统一消息来源标识（UMO）。只有 UMO 匹配此值的用户才能使用管理员级别的功能（构建、部署等）。支持两种配置格式：1) 仅用户ID（推荐）：直接填写QQ号，如 123456789；2) 完整UMO格式：platform:user_id，如 onebot:123456789",
     "default": ""
-  },
-  "admin_users": {
-    "type": "list",
-    "items": {
-      "type": "string"
-    },
-    "description": "管理员用户 ID 列表（回退配置）。插件优先使用 AstrBot 框架的管理员系统，当框架方法不可用时，使用此配置作为回退。支持配置多个管理员，所有管理员都拥有管理员级别的权限",
-    "default": []
   }
 }
