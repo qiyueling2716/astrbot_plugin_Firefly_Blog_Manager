@@ -1,5 +1,5 @@
 """
-AstrBot Firefly 博客管理插件 v1.3.3
+AstrBot Firefly 博客管理插件 v1.4.0
 
 通过 AI 指令管理 Firefly 博客的文章和部署。
 支持三种部署模式：
@@ -24,6 +24,7 @@ import functools
 import os
 import posixpath
 import re
+import shlex
 import glob
 import shutil
 import asyncio
@@ -52,6 +53,202 @@ BUILD_TIMEOUT = 600  # 10分钟
 DEPLOY_TIMEOUT = 300  # 5分钟
 SSH_KEEPALIVE_INTERVAL = 30
 SSH_KEEPALIVE_COUNT_MAX = 3
+
+# ============================================================================
+# 进阶语法功能元数据定义
+# ============================================================================
+
+ADVANCED_SYNTAX_FEATURES = {
+    "github_card": {
+        "name": "GitHub 仓库卡片",
+        "key": "advanced_syntax_github_card",
+        "category": "链接增强",
+        "pros": [
+            "可在文章中嵌入 GitHub 仓库动态信息卡片，展示 Star 数、Fork 数、描述等",
+            "自动从 GitHub API 获取最新数据，卡片内容始终为最新",
+            "适合技术博客引用开源项目，视觉效果专业",
+        ],
+        "cons": [
+            "依赖 GitHub API 可用性，离线环境无法渲染",
+            "每次页面加载都会发起 API 请求，增加加载时间",
+            "API 有频率限制，高流量博客可能触发限流",
+        ],
+        "syntax": '::github{repo="owner/repo"}',
+        "example": '::github{repo="CuteLeaf/Firefly"}',
+        "guide": "在 Markdown 中直接使用 `::github{repo=\"owner/repo\"}` 语法。"
+                "页面加载时，信息会从 GitHub API 获取并渲染为动态卡片。"
+                "适合在技术文章中引用开源项目。",
+    },
+    "admonitions": {
+        "name": "提醒框 (Admonitions)",
+        "key": "advanced_syntax_admonitions",
+        "category": "内容组织",
+        "pros": [
+            "支持 NOTE/TIP/IMPORTANT/WARNING/CAUTION 等多种类型，语义明确",
+            "可选 4 种主题：GitHub、Obsidian、VitePress、Docusaurus",
+            "适合突出重要信息、注意事项、警告等，提升文章可读性",
+        ],
+        "cons": [
+            "使用过多会导致文章视觉碎片化，降低阅读流畅性",
+            "不同主题语法略有差异，切换主题后需检查兼容性",
+            "Docusaurus 风格使用 `:::` 语法，与 GitHub 风格不兼容",
+        ],
+        "syntax": "> [!TYPE] 标题\n> 内容",
+        "example": "> [!NOTE] 注意\n> 这是一个重要提示。\n\n> [!WARNING] 警告\n> 此操作不可逆！",
+        "guide": "Firefly 支持 4 种提醒框主题（GitHub/Obsidian/VitePress/Docusaurus），"
+                "默认使用 GitHub 风格。基本语法：`> [!TYPE] 标题` + `> 内容`。"
+                "可用类型：NOTE、TIP、IMPORTANT、WARNING、CAUTION。"
+                "Obsidian 风格额外支持 abstract、info、todo、success、question、failure、danger、bug、example、quote。",
+    },
+    "spoiler": {
+        "name": "剧透文本",
+        "key": "advanced_syntax_spoiler",
+        "category": "内容组织",
+        "pros": [
+            "可隐藏敏感或剧透内容，用户点击才显示，增强互动性",
+            "支持内嵌 Markdown 语法（加粗、斜体等），灵活性高",
+            "适合隐藏答案、剧透、额外信息等",
+        ],
+        "cons": [
+            "移动端触控体验不佳（点击区域小），需要较大的点击目标",
+            "被隐藏内容可能被搜索引擎忽略，不利于 SEO",
+            "滥用会导致用户阅读体验下降",
+        ],
+        "syntax": ":spoiler[被隐藏的内容]",
+        "example": "答案：:spoiler[42]",
+        "guide": "使用 `:spoiler[内容]` 语法隐藏文本。"
+                "隐藏内容中支持 Markdown 格式，如 `:spoiler[**加粗**的秘密]`。"
+                "用户点击/触摸隐藏区域即可显示内容。",
+    },
+    "image_grid": {
+        "name": "图片画廊网格",
+        "key": "advanced_syntax_image_grid",
+        "category": "多媒体",
+        "pros": [
+            "可将 2-4 张图片并排展示，自动裁剪对齐，视觉整齐",
+            "响应式布局，自动适配不同屏幕尺寸",
+            "图注恒定底端对齐，适合照片对比、画廊展示",
+        ],
+        "cons": [
+            "比例不一致的图片会被裁剪（object-cover），完整内容需点击灯箱查看",
+            "仅支持 2-4 张图片，无法展示更多",
+            "被裁剪后部分图片内容不可见，建议使用相同比例的图片",
+        ],
+        "syntax": "[grid]\n![图片1](./img1.jpg)\n![图片2](./img2.jpg)\n[/grid]",
+        "example": "[grid]\n![示例一](./firefly1.avif)\n![示例二](./firefly2.avif)\n[/grid]",
+        "guide": "使用 `[grid]` 和 `[/grid]` 标签包裹图片。"
+                "支持 2-4 张图片并排，系统自动响应式布局。"
+                "同一行图片若比例不一致，会自动裁剪居中。"
+                "建议使用相同长宽比的图片。",
+    },
+    "code_blocks": {
+        "name": "代码块进阶 (Expressive Code)",
+        "key": "advanced_syntax_code_blocks",
+        "category": "代码展示",
+        "pros": [
+            "支持编辑器/终端框架，可设置文件名或终端标题",
+            "支持行号、行高亮标记(diff/ins/del)、行标签",
+            "支持可折叠区域、自动换行、ANSI 转义序列渲染",
+            "适合技术教程和代码演示",
+        ],
+        "cons": [
+            "语法复杂，配置项多，新手学习成本高",
+            "部分功能依赖代码块元数据（如 title=\"xxx\"、showLineNumbers 等），需额外记忆",
+            "Diff 语法与特定语言语法高亮混用时需注意兼容性",
+        ],
+        "syntax": "```lang title=\"文件名\" showLineNumbers\n// 代码\n```",
+        "example": '```js title="app.js" showLineNumbers\n// 第1行\nconsole.log("Hello")\n// 第3行 - 标记\n```',
+        "guide": "Firefly 使用 Expressive Code 渲染代码块。主要配置：\n"
+                "- `title=\"文件名\"` — 显示编辑器框架和文件名\n"
+                "- `title=\"Terminal window\"` — 终端框架样式\n"
+                "- `frame=\"none\"` — 无框架\n"
+                "- `showLineNumbers` — 显示行号\n"
+                "- 行标记：在代码块元数据中标注行号，如 `\"第3行\"` 或 `\"7-8\"`\n"
+                "- 标记类型：`mark`（默认蓝）、`ins`（绿色插入）、`del`（红色删除）\n"
+                "- diff 语法：以 `+`/`-` 开头自动识别为 diff 标记\n"
+                "- 折叠：在代码块中自动折叠样板代码",
+    },
+    "mermaid": {
+        "name": "Mermaid 图表",
+        "key": "advanced_syntax_mermaid",
+        "category": "图表绘制",
+        "pros": [
+            "用纯文本描述即可生成多种图表，无需外部工具",
+            "支持流程图、时序图、甘特图、类图、状态图、饼图",
+            "与 Markdown 原生集成，版本管理友好",
+        ],
+        "cons": [
+            "复杂图表语法冗长，维护成本高",
+            "不支持所有图表类型（如 ER 图、部署图需用 PlantUML）",
+            "渲染依赖客户端 JavaScript，某些阅读器不支持",
+        ],
+        "syntax": "```mermaid\n图表类型\n  语法描述\n```",
+        "example": "```mermaid\nflowchart TD\n  A[开始] --> B{条件}\n  B -->|是| C[结果1]\n  B -->|否| D[结果2]\n```",
+        "guide": "在代码块中指定 `mermaid` 语言即可。支持的图表类型：\n"
+                "- `flowchart TD/LR` — 流程图\n"
+                "- `sequenceDiagram` — 时序图\n"
+                "- `gantt` — 甘特图\n"
+                "- `classDiagram` — 类图\n"
+                "- `stateDiagram` — 状态图\n"
+                "- `pie` — 饼图\n\n"
+                "Mermaid 适合轻量级图表，如需更丰富的图表类型（ER图、C4图等），"
+                "请使用 PlantUML。",
+    },
+    "plantuml": {
+        "name": "PlantUML 图表",
+        "key": "advanced_syntax_plantuml",
+        "category": "图表绘制",
+        "pros": [
+            "图表类型比 Mermaid 更丰富：活动图、用例图、组件图、部署图、ER图、C4架构图",
+            "支持亮暗主题自动切换，缩放、拖拽和全屏交互",
+            "语法高度结构化，适合软件工程文档",
+        ],
+        "cons": [
+            "依赖外部 PlantUML 服务器渲染 SVG，内网环境可能需要自建服务",
+            "渲染速度比 Mermaid 慢（需要网络请求）",
+            "语法比 Mermaid 更复杂，学习曲线更陡",
+        ],
+        "syntax": "```plantuml\n@startuml\n  图表定义\n@enduml\n```",
+        "example": "```plantuml\n@startuml\nactor User\nUser -> (登录)\nUser -> (查看文章)\n@enduml\n```",
+        "guide": "在代码块中指定 `plantuml` 语言。Firefly 会在构建时编码并生成 SVG。\n"
+                "支持的图表类型：\n"
+                "- 活动图 (activity)\n"
+                "- 时序图 (sequence)\n"
+                "- 用例图 (usecase)\n"
+                "- 类图 (class)\n"
+                "- 组件图 (component)\n"
+                "- 部署图 (deployment)\n"
+                "- ER 图 (entity)\n"
+                "- 状态图 (state)\n"
+                "- C4 架构图\n\n"
+                "PlantUML 适合需要丰富图表类型的软件工程文档。",
+    },
+    "katex": {
+        "name": "KaTeX 数学公式",
+        "key": "advanced_syntax_katex",
+        "category": "学术/数学",
+        "pros": [
+            "渲染速度极快，不依赖外部服务",
+            "支持行内公式、块级公式、矩阵、极限、求和、化学方程式",
+            "适合数学、物理、计算机科学等技术博客",
+        ],
+        "cons": [
+            "仅支持 LaTeX 数学模式子集，不支持 amsmath 的某些高级宏",
+            "复杂公式占用较多垂直空间，可能影响阅读节奏",
+            "不支持 \newcommand 等自定义命令",
+        ],
+        "syntax": "$行内公式$ 或 $$块级公式$$",
+        "example": "欧拉公式：$e^{i\\pi} + 1 = 0$\n\n质能方程：$$E = mc^2$$",
+        "guide": "行内公式使用单 `$` 包裹，块级公式使用双 `$$` 包裹。\n"
+                "支持常见 LaTeX 数学语法：\n"
+                "- 分数：`\\frac{分子}{分母}`\n"
+                "- 矩阵：`\\begin{pmatrix} a & b \\\\ c & d \\end{pmatrix}`\n"
+                "- 求和：`\\sum_{n=1}^{\\infty}`\n"
+                "- 极限：`\\lim_{x \\to 0}`\n"
+                "- 化学方程式：`\\ce{CH4 + 2O2 -> CO2 + 2H2O}`\n\n"
+                "更多语法参考 KaTeX 官方文档。",
+    },
+}
 
 
 # ============================================================================
@@ -234,6 +431,61 @@ class PostInfo:
     draft: bool
 
 
+@dataclass
+class Submission:
+    """投稿数据模型"""
+    id: str
+    title: str
+    content: str
+    author_name: str = ""
+    author_email: str = ""
+    tags: str = ""
+    category: str = ""
+    description: str = ""
+    submit_time: str = ""
+    user_id: str = ""
+    status: str = "pending"  # pending / approved / rejected
+    reject_reason: str = ""
+    ai_review: Optional[dict] = None  # AI 初审结果
+
+    def to_dict(self) -> dict:
+        result = {
+            "id": self.id,
+            "title": self.title,
+            "content": self.content,
+            "author_name": self.author_name,
+            "author_email": self.author_email,
+            "tags": self.tags,
+            "category": self.category,
+            "description": self.description,
+            "submit_time": self.submit_time,
+            "user_id": self.user_id,
+            "status": self.status,
+            "reject_reason": self.reject_reason,
+        }
+        if self.ai_review is not None:
+            result["ai_review"] = self.ai_review
+        return result
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "Submission":
+        return cls(
+            id=d.get("id", ""),
+            title=d.get("title", ""),
+            content=d.get("content", ""),
+            author_name=d.get("author_name", ""),
+            author_email=d.get("author_email", ""),
+            tags=d.get("tags", ""),
+            category=d.get("category", ""),
+            description=d.get("description", ""),
+            submit_time=d.get("submit_time", ""),
+            user_id=d.get("user_id", ""),
+            status=d.get("status", "pending"),
+            reject_reason=d.get("reject_reason", ""),
+            ai_review=d.get("ai_review"),
+        )
+
+
 # ============================================================================
 # 自定义异常类
 # ============================================================================
@@ -277,6 +529,30 @@ class SSHConnectionError(BlogManagerError):
 # 命令执行器抽象
 # ============================================================================
 
+def _sanitize_command(command: str) -> str:
+    """移除命令中的敏感信息（密码等），用于日志输出"""
+    return re.sub(r"export SSHPASS='[^']*'", "export SSHPASS='***'", command)
+
+
+def _validate_shell_command(command: str) -> bool:
+    """检查命令是否包含危险的 shell 注入模式
+
+    作为纵深防御手段，在命令执行前检测 $(...) 和反引号等命令替换语法。
+    所有用户可控参数应已在调用前通过 shlex.quote() 转义，此检查仅作
+    最后一道防线。
+    """
+    dangerous = [
+        (r'\$\(', '$(...) 命令替换'),
+        (r'`[^`]+`', '反引号命令替换'),
+    ]
+    for pattern, desc in dangerous:
+        if re.search(pattern, command):
+            logger.warning(f"[Security] 命令包含潜在危险的 shell 模式 ({desc})，已拒绝执行")
+            logger.debug(f"[Security] 被拒绝的命令: {_sanitize_command(command)}")
+            return False
+    return True
+
+
 class CommandExecutor(ABC):
     """命令执行器抽象基类，统一本地和远程命令执行接口"""
 
@@ -295,8 +571,18 @@ class LocalExecutor(CommandExecutor):
     """本地命令执行器，使用 asyncio 子进程"""
 
     async def run(self, command: str, cwd: Optional[str] = None, timeout: int = 300) -> tuple[int, str, str]:
-        """执行命令，返回 (returncode, stdout, stderr)"""
-        logger.debug(f"[LocalExecutor] 执行命令: {command}")
+        """执行命令，返回 (returncode, stdout, stderr)
+
+        安全说明：使用 create_subprocess_shell 是为了支持包含 shell 特性
+        （管道、重定向、&& 链式命令）的构建命令。所有用户可控的参数（路径、
+        主机名等）在调用前已通过 shlex.quote() 进行转义。执行前会进行
+        命令注入模式检测作为最后一道防线。
+        """
+        logger.debug(f"[LocalExecutor] 执行命令: {_sanitize_command(command)}")
+
+        # 安全最佳实践：执行前检查命令是否包含危险的 shell 注入模式
+        if not _validate_shell_command(command):
+            return -1, "", "命令包含潜在危险的 shell 模式，已被拒绝执行"
         
         try:
             # 验证工作目录
@@ -316,7 +602,7 @@ class LocalExecutor(CommandExecutor):
                 returncode = proc.returncode or 0
                 
                 if returncode != 0:
-                    logger.debug(f"[LocalExecutor] 命令执行失败: {command}, 返回码: {returncode}, 错误: {stderr.decode('utf-8', errors='replace')}")
+                    logger.debug(f"[LocalExecutor] 命令执行失败: {_sanitize_command(command)}, 返回码: {returncode}, 错误: {stderr.decode('utf-8', errors='replace')}")
                 
                 return (
                     returncode,
@@ -326,17 +612,17 @@ class LocalExecutor(CommandExecutor):
             except asyncio.TimeoutError:
                 proc.kill()
                 await proc.wait()
-                logger.error(f"[LocalExecutor] 命令执行超时: {command}")
+                logger.error(f"[LocalExecutor] 命令执行超时: {_sanitize_command(command)}")
                 return -1, "", f"命令执行超时（{timeout}秒）"
         except PermissionError:
-            logger.error(f"[LocalExecutor] 权限不足: {command}")
+            logger.error(f"[LocalExecutor] 权限不足: {_sanitize_command(command)}")
             return -1, "", "权限不足，请检查文件或目录权限"
         except FileNotFoundError:
-            logger.error(f"[LocalExecutor] 命令未找到: {command}")
+            logger.error(f"[LocalExecutor] 命令未找到: {_sanitize_command(command)}")
             return -1, "", "命令未找到，请检查是否安装了相关工具"
         except Exception as e:
-            logger.error(f"[LocalExecutor] 执行命令异常: {command}, 错误: {e}")
-            return -1, "", str(e)
+            logger.error(f"[LocalExecutor] 执行命令异常: {_sanitize_command(command)}, 错误: {e}")
+            return -1, "", "命令执行异常，请检查日志获取详细信息"
 
     async def close(self):
         """关闭执行器（本地执行器无需特殊清理）"""
@@ -410,11 +696,17 @@ class RemoteExecutor(CommandExecutor):
                 "host": hostname,
                 "port": port,
                 "username": username,
-                "known_hosts": None,
                 "keepalive_interval": SSH_KEEPALIVE_INTERVAL,
                 "keepalive_count_max": SSH_KEEPALIVE_COUNT_MAX,
                 "connect_timeout": 15,
             }
+            # 安全最佳实践：使用 known_hosts 进行主机密钥验证，防止中间人攻击
+            # 如果配置了已知主机文件路径则使用，否则使用 asyncssh 默认的 ~/.ssh/known_hosts
+            known_hosts_path = self.config.get("ssh_known_hosts_path", "").strip()
+            if known_hosts_path:
+                expanded = os.path.expanduser(known_hosts_path)
+                connect_options["known_hosts"] = expanded
+                logger.debug(f"[SSH] 使用 known_hosts: {expanded}")
 
             if auth_type == "password":
                 password = self.config.get("password", "")
@@ -422,12 +714,12 @@ class RemoteExecutor(CommandExecutor):
                     self._status = ConnectionStatus.ERROR
                     raise ConfigurationError("密码认证方式但未配置 password")
                 connect_options["password"] = password
-                logger.info(f"[SSH] 使用密码认证连接 {hostname}:{port}")
+                logger.info("[SSH] 使用密码认证连接远程服务器")
             else:
                 key_path = self.config.get("private_key_path", "")
                 if key_path and os.path.exists(key_path):
                     connect_options["client_keys"] = [key_path]
-                    logger.info(f"[SSH] 使用密钥认证连接 {hostname}:{port}")
+                    logger.info("[SSH] 使用密钥认证连接远程服务器")
                 else:
                     logger.warning(f"[SSH] 私钥文件不存在: {key_path}，尝试使用 SSH Agent")
 
@@ -437,7 +729,7 @@ class RemoteExecutor(CommandExecutor):
                 self._connect_attempts = 0
                 self._status = ConnectionStatus.CONNECTED
                 self._last_error = None
-                logger.info(f"[SSH] 连接成功: {hostname}:{port}")
+                logger.info("[SSH] 连接成功")
             except asyncssh.Error as e:
                 self._connect_attempts += 1
                 self._last_error = str(e)
@@ -454,7 +746,7 @@ class RemoteExecutor(CommandExecutor):
 
     async def run(self, command: str, cwd: Optional[str] = None, timeout: int = 300) -> tuple[int, str, str]:
         """执行远程命令，返回 (returncode, stdout, stderr)"""
-        logger.debug(f"[RemoteExecutor] 执行命令: {command}")
+        logger.debug(f"[RemoteExecutor] 执行命令: {_sanitize_command(command)}")
         
         try:
             await self._ensure_connected()
@@ -467,25 +759,25 @@ class RemoteExecutor(CommandExecutor):
                 returncode = result.exit_status or 0
                 
                 if returncode != 0:
-                    logger.debug(f"[RemoteExecutor] 命令执行失败: {command}, 返回码: {returncode}")
+                    logger.debug(f"[RemoteExecutor] 命令执行失败: {_sanitize_command(command)}, 返回码: {returncode}")
                 
                 return returncode, result.stdout or "", result.stderr or ""
             except asyncssh.TimeoutError:
-                logger.error(f"[RemoteExecutor] 命令执行超时: {command}")
+                logger.error(f"[RemoteExecutor] 命令执行超时: {_sanitize_command(command)}")
                 # 超时不重置连接，可能是命令本身耗时太长
                 return -1, "", f"命令执行超时（{timeout}秒）"
             except asyncssh.Error as e:
-                logger.error(f"[RemoteExecutor] SSH 错误: {command}, 错误: {e}")
+                logger.error(f"[RemoteExecutor] SSH 错误: {_sanitize_command(command)}, 错误: {e}")
                 # 重置连接状态，下次自动重连
                 self._conn = None
                 self._sftp = None
                 self._status = ConnectionStatus.DISCONNECTED
                 self._last_error = str(e)
-                return -1, "", str(e)
+                return -1, "", "SSH 命令执行失败，请检查日志获取详细信息"
         except SSHConnectionError as e:
-            return -1, "", str(e)
+            return -1, "", "SSH 连接失败，请检查日志获取详细信息"
         except ConfigurationError as e:
-            return -1, "", str(e)
+            return -1, "", "SSH 配置错误，请检查日志获取详细信息"
 
     async def get_sftp(self):
         """获取 SFTP 客户端（复用已有连接）"""
@@ -603,6 +895,8 @@ class LocalFileSystem(FileSystem):
             
             with open(path, "w", encoding="utf-8") as f:
                 f.write(content)
+            # 安全最佳实践：显式设置文件权限，避免依赖 umask
+            os.chmod(path, 0o644)
             return True
         except PermissionError:
             logger.error(f"[LocalFileSystem] 写入文件权限不足: {path}")
@@ -848,11 +1142,12 @@ class BuildDeployManager:
         logger.info(f"[BuildDeployManager] 初始化完成 - 部署模式: {self.deploy_mode.value}")
 
     def _validate_path(self, path: str, config_name: str) -> str:
-        """校验路径配置的有效性"""
+        """校验路径配置的有效性，防止路径遍历"""
         if not isinstance(path, str) or not path.strip():
             logger.warning(f"[BuildDeployManager] {config_name} 配置无效，使用默认路径")
             return "/var/www/firefly" if "blog" in config_name else "/var/www/html"
-        return path.strip()
+        # 安全最佳实践：规范化路径，防止路径遍历攻击
+        return os.path.realpath(path.strip())
 
     async def _is_firefly_blog(self, path: str) -> bool:
         """检查路径是否为 Firefly 博客项目"""
@@ -1101,7 +1396,29 @@ class BuildDeployManager:
             shutil.copytree(local_dist, self.web_root)
             return True, f"已部署到 {self.web_root}"
         except Exception as e:
-            return False, f"部署失败: {e}"
+            logger.error(f"[BuildDeployManager] 本地部署失败: {e}")
+            return False, "部署失败，请检查日志获取详细信息"
+
+    async def _run_sshpass(self, inner_cmd: str, timeout: int = 300) -> tuple[int, str, str]:
+        """安全执行 sshpass 命令，密码通过临时文件传递而非环境变量
+
+        避免密码出现在进程列表（/proc/*/environ）中，同时防止密码中的
+        特殊字符（如单引号）破坏 shell 命令结构。
+        """
+        import tempfile
+        password = self.config.get("password", "")
+        fd, temp_path = tempfile.mkstemp()
+        try:
+            os.write(fd, password.encode())
+            os.close(fd)
+            os.chmod(temp_path, 0o600)
+            cmd = f"sshpass -f {shlex.quote(temp_path)} {inner_cmd}"
+            return await self.local_executor.run(cmd, timeout=timeout)
+        finally:
+            try:
+                os.unlink(temp_path)
+            except OSError:
+                pass
 
     async def _deploy_local_to_remote(self):
         """本地构建后通过 rsync/scp 部署到远端"""
@@ -1118,7 +1435,11 @@ class BuildDeployManager:
         auth_type = self.config.get("auth_type", "key")
 
         # 优先使用 rsync 部署
-        ssh_opts = f"-p {port} -o StrictHostKeyChecking=no"
+        # 安全最佳实践：使用 StrictHostKeyChecking=yes 防止中间人攻击
+        # 关闭时使用 accept-new（首次自动接受，后续变更拒绝），比完全禁用安全
+        strict_checking = self.config.get("ssh_strict_host_key_checking", True)
+        checking_opt = "yes" if strict_checking else "accept-new"
+        ssh_opts = f"-p {port} -o StrictHostKeyChecking={checking_opt}"
         if auth_type == "key":
             key_path = self.config.get("private_key_path", "")
             if key_path and os.path.exists(key_path):
@@ -1126,22 +1447,23 @@ class BuildDeployManager:
             rsync_cmd = (
                 f'rsync -avz --delete '
                 f'-e "ssh {ssh_opts}" '
-                f'"{local_dist}/" "{username}@{hostname}:{self.remote_web_root}/"'
+                f'{shlex.quote(f"{local_dist}/")} {shlex.quote(f"{username}@{hostname}:{self.remote_web_root}/")}'
             )
         else:
-            # 密码认证：使用 SSH_ASKPASS 模式或警告用户
+            # 密码认证：使用 sshpass -f 从临时文件读取密码，避免密码出现在进程列表中
             password = self.config.get("password", "")
             if not password:
                 return False, "密码认证模式下未配置密码"
-            logger.warning("[Firefly] 密码认证将临时写入 SSH 配置文件，部署后立即清理")
-            sshpass_cmd = (
-                f'sshpass -e rsync -avz --delete '
+            rsync_cmd = (
+                f'rsync -avz --delete '
                 f'-e "ssh {ssh_opts}" '
-                f'"{local_dist}/" "{username}@{hostname}:{self.remote_web_root}/"'
+                f'{shlex.quote(f"{local_dist}/")} {shlex.quote(f"{username}@{hostname}:{self.remote_web_root}/")}'
             )
-            rsync_cmd = f"export SSHPASS='{password}'; {sshpass_cmd}; unset SSHPASS"
 
-        rc, out, err = await self.local_executor.run(rsync_cmd, timeout=300)
+        if auth_type == "password":
+            rc, out, err = await self._run_sshpass(rsync_cmd, timeout=300)
+        else:
+            rc, out, err = await self.local_executor.run(rsync_cmd, timeout=300)
         if rc != 0:
             # rsync 失败，检查是否是本地路径问题
             logger.warning(f"rsync 失败: {err}")
@@ -1160,7 +1482,10 @@ class BuildDeployManager:
 
     async def _deploy_via_scp(self, local_dist: str, hostname: str, username: str, port: int, auth_type: str) -> tuple[bool, str]:
         """通过 scp 部署（rsync 失败时的回退方案）"""
-        ssh_opts = f"-P {port} -o StrictHostKeyChecking=no"
+        # 安全最佳实践：使用 StrictHostKeyChecking=yes 防止中间人攻击
+        strict_checking = self.config.get("ssh_strict_host_key_checking", True)
+        checking_opt = "yes" if strict_checking else "accept-new"
+        ssh_opts = f"-P {port} -o StrictHostKeyChecking={checking_opt}"
 
         if auth_type == "key":
             key_path = self.config.get("private_key_path", "")
@@ -1168,21 +1493,22 @@ class BuildDeployManager:
                 ssh_opts += f" -i {key_path}"
             scp_cmd = (
                 f'scp -r {ssh_opts} '
-                f'"{local_dist}/*" "{username}@{hostname}:{self.remote_web_root}/"'
+                f'{shlex.quote(f"{local_dist}/*")} {shlex.quote(f"{username}@{hostname}:{self.remote_web_root}/")}'
             )
         else:
             password = self.config.get("password", "")
             if not password:
                 return False, "密码认证模式下未配置密码"
-            logger.warning("[Firefly] 密码认证将使用环境变量传递密码，避免泄露到进程列表")
             await self.remote_executor.run(f"rm -rf {self.remote_web_root}/*")
-            sshpass_cmd = (
-                f'sshpass -e scp -r {ssh_opts} '
-                f'"{local_dist}/*" "{username}@{hostname}:{self.remote_web_root}/"'
+            scp_cmd = (
+                f'scp -r {ssh_opts} '
+                f'{shlex.quote(f"{local_dist}/*")} {shlex.quote(f"{username}@{hostname}:{self.remote_web_root}/")}'
             )
-            scp_cmd = f"export SSHPASS='{password}'; {sshpass_cmd}; unset SSHPASS"
 
-        rc, out, err = await self.local_executor.run(scp_cmd, timeout=300)
+        if auth_type == "password":
+            rc, out, err = await self._run_sshpass(scp_cmd, timeout=300)
+        else:
+            rc, out, err = await self.local_executor.run(scp_cmd, timeout=300)
         if rc != 0:
             return False, f"scp 部署失败:\n{err}"
         return True, f"已通过 scp 部署到 {hostname}:{self.remote_web_root}"
@@ -1353,6 +1679,10 @@ class FireflyBlogManager(Star):
         self.build_manager: Optional[BuildDeployManager] = None
         self._init_components()
         
+        # 安全最佳实践：未配置 admin_umo 时发出警告
+        if not self.config.get("admin_umo", "").strip():
+            logger.warning("[Firefly] 未配置管理员 UMO，所有管理操作无需权限验证。请在生产环境中设置 admin_umo。")
+        
         # 投稿持久化配置
         self._submissions_file = os.path.join(
             os.path.dirname(os.path.abspath(__file__)), 
@@ -1375,10 +1705,199 @@ class FireflyBlogManager(Star):
         try:
             with open(self._submissions_file, 'w', encoding='utf-8') as f:
                 json.dump(self._submissions_cache, f, ensure_ascii=False, indent=2)
+            # 安全最佳实践：显式设置文件权限，避免依赖 umask
+            os.chmod(self._submissions_file, 0o644)
             return True
         except Exception as e:
             logger.error(f"[Firefly] 保存投稿缓存失败: {e}")
             return False
+
+    def _get_submission(self, submission_id: str) -> Optional[Submission]:
+        """获取单个投稿对象"""
+        d = self._submissions_cache.get(submission_id)
+        return Submission.from_dict(d) if d else None
+
+    def _list_submissions(self, status: str = "") -> List[Submission]:
+        """列出投稿，可按状态过滤
+
+        Args:
+            status: 为空则返回全部，否则只返回 matching status
+        """
+        items = self._submissions_cache.values()
+        if status:
+            items = [s for s in items if s.get("status") == status]
+        return sorted(
+            [Submission.from_dict(s) for s in items],
+            key=lambda x: x.submit_time,
+            reverse=True,
+        )
+
+    def _get_submission_stats(self) -> dict:
+        """获取投稿统计信息"""
+        total = len(self._submissions_cache)
+        pending = sum(1 for s in self._submissions_cache.values() if s.get("status") == "pending")
+        approved = sum(1 for s in self._submissions_cache.values() if s.get("status") == "approved")
+        rejected = sum(1 for s in self._submissions_cache.values() if s.get("status") == "rejected")
+        return {"total": total, "pending": pending, "approved": approved, "rejected": rejected}
+
+    def _store_ai_review_result(self, submission_id: str, review_result: dict):
+        """将 AI 初审结果存入投稿记录"""
+        if submission_id in self._submissions_cache:
+            self._submissions_cache[submission_id]["ai_review"] = review_result
+            self._save_submissions()
+
+    async def _perform_ai_review(self, submission: dict) -> dict:
+        """使用 AI 对投稿内容进行初审评估
+
+        通过 AstrBot 的 tool_loop_agent 调用 LLM，从内容质量、格式规范、
+        主题相关性、完整性等维度对投稿进行评估。
+
+        Args:
+            submission: 投稿字典
+
+        Returns:
+            {
+                "passed": bool,           # 是否建议过审
+                "score": int,             # 评分 1-10
+                "summary": str,           # 一句话摘要
+                "strengths": [str],       # 优点列表
+                "issues": [str],          # 问题列表
+                "suggestions": [str],     # 改进建议
+                "review_time": str,       # 审核时间
+            }
+        """
+        review_prompt = (
+            f"你是一位严谨的博客内容审核编辑。请对以下投稿文章进行初审，从以下维度评估：\n\n"
+            f"1. 内容质量：文章是否有实质内容？逻辑是否清晰？\n"
+            f"2. 格式规范：Markdown 格式是否正确？标题层级是否合理？\n"
+            f"3. 完整性：文章是否完整？是否有明显的未完待续？\n"
+            f"4. 可读性：语言表达是否通顺？\n\n"
+            f"=== 投稿信息 ===\n"
+            f"标题：{submission.get('title', '无')}\n"
+            f"作者：{submission.get('author_name', '匿名')}\n"
+            f"分类：{submission.get('category', '未分类')}\n"
+            f"标签：{submission.get('tags', '无')}\n"
+            f"内容：\n{submission.get('content', '')[:3000]}\n"
+            f"=== 投稿信息结束 ===\n\n"
+            f"请以 JSON 格式返回评估结果，不要包含任何其他文字：\n"
+            f'{{"passed": true/false, "score": 1-10, "summary": "一句话摘要", '
+            f'"strengths": ["优点1", "优点2"], "issues": ["问题1", "问题2"], '
+            f'"suggestions": ["建议1", "建议2"]}}\n\n'
+            f"注意：passed 为 true 表示建议过审（质量合格），false 表示建议打回修改。"
+        )
+
+        try:
+            # 使用 AstrBot 的 llm_generate 调用 LLM 进行纯文本分析
+            # 无需 event 上下文，也不需要工具调用
+            llm_resp = await self.context.llm_generate(
+                chat_provider_id=None,  # 使用默认 provider
+                prompt=review_prompt,
+                system_prompt="你是一个严格的博客内容审核助手。请只返回 JSON 格式的评估结果，不要添加任何其他内容。",
+            )
+
+            # 从 LLM 响应中提取文本
+            resp_text = ""
+            if isinstance(llm_resp, str):
+                resp_text = llm_resp
+            elif hasattr(llm_resp, 'completion_text'):
+                resp_text = llm_resp.completion_text
+            elif hasattr(llm_resp, 'content'):
+                resp_text = llm_resp.content
+            elif isinstance(llm_resp, dict):
+                resp_text = llm_resp.get("completion_text", str(llm_resp))
+
+            # 尝试提取 JSON
+            import json as json_module
+            json_match = re.search(r'\{[\s\S]*\}', resp_text)
+            if json_match:
+                result = json_module.loads(json_match.group())
+                result["review_time"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                # 确保必要字段
+                result.setdefault("passed", False)
+                result.setdefault("score", 5)
+                result.setdefault("summary", "AI 初审完成")
+                result.setdefault("strengths", [])
+                result.setdefault("issues", [])
+                result.setdefault("suggestions", [])
+                return result
+            else:
+                logger.warning(f"[Firefly] AI 初审返回格式异常: {resp_text[:200]}")
+                return {
+                    "passed": None,
+                    "score": 0,
+                    "summary": "AI 初审未能完成（返回格式异常）",
+                    "strengths": [],
+                    "issues": ["AI 解析失败，请人工审核"],
+                    "suggestions": [],
+                    "review_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                }
+
+        except Exception as e:
+            logger.error(f"[Firefly] AI 初审执行失败: {e}")
+            return {
+                "passed": None,
+                "score": 0,
+                "summary": "AI 初审服务暂时不可用，请稍后重试",
+                "strengths": [],
+                "issues": ["AI 初审未能完成评估，需人工审核"],
+                "suggestions": ["请管理员进行人工审核"],
+                "review_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            }
+
+    def _format_ai_review_result(self, review: dict) -> str:
+        """格式化 AI 初审结果为可读文本"""
+        if not review or review.get("score", 0) == 0:
+            return ""
+
+        passed = review.get("passed")
+        score = review.get("score", 0)
+        summary = review.get("summary", "")
+        strengths = review.get("strengths", [])
+        issues = review.get("issues", [])
+        suggestions = review.get("suggestions", [])
+
+        if passed is True:
+            verdict = "**AI 初审建议：过审**"
+        elif passed is False:
+            verdict = "**AI 初审建议：打回修改**"
+        else:
+            verdict = "**AI 初审异常，请人工审核**"
+
+        lines = [
+            "",
+            "---",
+            "## AI 初审结果",
+            "",
+            verdict,
+            f"**综合评分**: {score}/10",
+            f"**摘要**: {summary}",
+            "",
+        ]
+
+        if strengths:
+            lines.append("### 优点")
+            for s in strengths:
+                lines.append(f"- {s}")
+            lines.append("")
+
+        if issues:
+            lines.append("### 问题")
+            for i in issues:
+                lines.append(f"- {i}")
+            lines.append("")
+
+        if suggestions:
+            lines.append("### 改进建议")
+            for s in suggestions:
+                lines.append(f"- {s}")
+            lines.append("")
+
+        if passed is True:
+            lines.append("> 管理员可选择：**1. 过审**（批准发布）或 **2. 复审**（查看全文后决定）")
+        elif passed is False:
+            lines.append("> 管理员可选择：**1. 过审**（忽略建议直接批准）或 **2. 打回**（附修改意见拒绝）")
+
+        return "\n".join(lines)
 
     def _get_umo(self, event) -> Optional[str]:
         """从事件对象中获取统一消息来源标识（UMO）
@@ -1457,7 +1976,7 @@ class FireflyBlogManager(Star):
                 if current_umo == admin_umo:
                     return True, ""
         
-        return False, f"[ERROR] 权限不足：此操作仅允许管理员使用。当前用户: {current_umo}"
+        return False, "[ERROR] 权限不足：此操作仅允许管理员使用"
 
     def _is_firefly_blog(self, path: str) -> bool:
         """检查路径是否为 Firefly 博客项目"""
@@ -2222,7 +2741,7 @@ class FireflyBlogManager(Star):
         '''
         import uuid
         
-        submission_id = str(uuid.uuid4())[:8]
+        submission_id = uuid.uuid4().hex[:12]
         submit_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         
         user_id = (
@@ -2251,38 +2770,92 @@ class FireflyBlogManager(Star):
         self._submissions_cache[submission_id] = submission
         
         # 持久化保存
-        if self._save_submissions():
-            yield f"[OK] 投稿成功\n\n投稿 ID: {submission_id}\n标题: {title}\n作者: {author_name or '匿名'}\n提交时间: {submit_time}\n\n您的投稿已保存，等待主人审核。主人审核通过后，文章将正式发布到博客"
+        save_success = self._save_submissions()
+        enable_ai_review = self.config.get("enable_ai_review", True)
+
+        if save_success:
+            if enable_ai_review:
+                # 启用 AI 初审：先通知投稿成功 + AI 审核中
+                yield (
+                    f"[OK] 投稿成功\n\n"
+                    f"投稿 ID: {submission_id}\n"
+                    f"标题: {title}\n"
+                    f"作者: {author_name or '匿名'}\n"
+                    f"提交时间: {submit_time}\n\n"
+                    f"AI 初审中，请稍候……"
+                )
+
+                # 执行 AI 初审
+                review_result = await self._perform_ai_review(submission)
+                self._store_ai_review_result(submission_id, review_result)
+
+                # 展示初审结果
+                review_text = self._format_ai_review_result(review_result)
+                if review_text:
+                    yield review_text
+            else:
+                # 未启用 AI 初审：仅发送提醒通知
+                yield (
+                    f"[OK] 投稿成功\n\n"
+                    f"投稿 ID: {submission_id}\n"
+                    f"标题: {title}\n"
+                    f"作者: {author_name or '匿名'}\n"
+                    f"提交时间: {submit_time}\n\n"
+                    f"您的投稿已保存，等待主人审核。主人审核通过后，文章将正式发布到博客。\n"
+                    f"主人可使用 /博客投稿列表 查看并审核投稿。"
+                )
         else:
-            yield f"[WARNING] 投稿已保存到内存，但文件保存失败。插件重启后投稿可能丢失\n\n投稿 ID: {submission_id}\n标题: {title}\n作者: {author_name or '匿名'}\n提交时间: {submit_time}"
+            yield (
+                f"[WARNING] 投稿已保存到内存，但文件保存失败。插件重启后投稿可能丢失\n\n"
+                f"投稿 ID: {submission_id}\n"
+                f"标题: {title}\n"
+                f"作者: {author_name or '匿名'}\n"
+                f"提交时间: {submit_time}"
+            )
 
     @filter.llm_tool(name="list_post_submissions")
     @require_admin
-    async def list_post_submissions(self, event):
-        '''列出所有待审核的文章投稿。需要主人权限。'''
+    async def list_post_submissions(self, event, status: str = ""):
+        '''列出所有投稿。需要主人权限。
+
+        可按状态过滤：不传参数返回全部，传 "pending" 仅返回待审核，
+        传 "approved" 仅返回已批准，传 "rejected" 仅返回已拒绝。
+
+        Args:
+            status(string): 可选，按状态过滤投稿。可选值：pending / approved / rejected
+        '''
         if not self._submissions_cache:
-            yield "[INFO] 暂无待审核的投稿"
+            yield "[INFO] 暂无投稿记录"
             return
 
-        submissions = sorted(
-            self._submissions_cache.values(),
-            key=lambda x: x["submit_time"],
-            reverse=True
-        )
+        submissions = self._list_submissions(status)
+        if not submissions:
+            status_map = {"pending": "待审核", "approved": "已批准", "rejected": "已拒绝"}
+            yield f"[INFO] 暂无{status_map.get(status, '')}的投稿"
+            return
 
-        result = "[INFO] 待审核投稿列表:\n\n"
+        stats = self._get_submission_stats()
+        result = f"[INFO] 投稿列表（共 {stats['total']} 条 | 待审核 {stats['pending']} | 已批准 {stats['approved']} | 已拒绝 {stats['rejected']}）\n\n"
         for sub in submissions:
-            status_str = {
-                "pending": "[PENDING]",
-                "approved": "[APPROVED]",
-                "rejected": "[REJECTED]"
-            }.get(sub["status"], "[UNKNOWN]")
-            
-            result += f"{status_str} {sub['title']}\n"
-            result += f"   - 投稿 ID: {sub['id']}\n"
-            result += f"   - 作者: {sub['author_name'] or '匿名'}\n"
-            result += f"   - 提交时间: {sub['submit_time']}\n"
-            result += f"   - 状态: {'待审核' if sub['status'] == 'pending' else '已批准' if sub['status'] == 'approved' else '已拒绝'}\n"
+            status_emoji = {"pending": "⏳", "approved": "✅", "rejected": "❌"}
+            result += f"{status_emoji.get(sub.status, '❓')} {sub.title}\n"
+            result += f"   - 投稿 ID: `{sub.id}`\n"
+            result += f"   - 作者: {sub.author_name or '匿名'}\n"
+            result += f"   - 提交时间: {sub.submit_time}\n"
+            status_text = {"pending": "待审核", "approved": "已批准", "rejected": "已拒绝"}.get(sub.status, sub.status)
+            result += f"   - 状态: {status_text}\n"
+            # AI 初审状态
+            if sub.ai_review:
+                ai_passed = sub.ai_review.get("passed")
+                ai_score = sub.ai_review.get("score", "?")
+                if ai_passed is True:
+                    result += f"   - AI 初审: 建议过审 ({ai_score}/10)\n"
+                elif ai_passed is False:
+                    result += f"   - AI 初审: 建议打回 ({ai_score}/10)\n"
+                else:
+                    result += f"   - AI 初审: 异常，需人工审核\n"
+            if sub.reject_reason:
+                result += f"   - 拒绝原因: {sub.reject_reason}\n"
             result += "\n"
 
         yield result
@@ -2309,6 +2882,13 @@ class FireflyBlogManager(Star):
         result += f"分类: {submission['category'] or '未设置'}\n"
         result += f"标签: {submission['tags'] or '未设置'}\n"
         result += f"描述: {submission['description'] or '未设置'}\n"
+
+        # 展示 AI 初审结果（如果存在）
+        ai_review = submission.get("ai_review")
+        if ai_review:
+            result += self._format_ai_review_result(ai_review)
+            result += "\n"
+
         result += f"\n正文内容:\n\n{submission['content']}\n"
 
         yield result
@@ -2396,6 +2976,244 @@ class FireflyBlogManager(Star):
 
         yield result
 
+    @filter.llm_tool(name="delete_submission")
+    @require_admin
+    async def delete_submission(self, event, submission_id: str):
+        '''删除指定投稿记录。需要主人权限。
+
+        用于清理已处理（已批准/已拒绝）的投稿记录，或删除错误提交的草稿。
+        被删除的投稿将永久移除，不可恢复。
+
+        Args:
+            submission_id(string): 投稿 ID
+        '''
+        submission = self._submissions_cache.get(submission_id)
+        if not submission:
+            yield f"[ERROR] 未找到投稿 ID: {submission_id}"
+            return
+
+        title = submission.get("title", "未知")
+        del self._submissions_cache[submission_id]
+        self._save_submissions()
+
+        yield f"[OK] 投稿《{title}》(ID: {submission_id}) 已永久删除"
+
+    @filter.llm_tool(name="retract_submission")
+    async def retract_submission(self, event, submission_id: str):
+        '''撤回自己的投稿。仅投稿者本人可以撤回。
+
+        只能撤回状态为"待审核"的投稿，已批准或已拒绝的投稿无法撤回。
+
+        Args:
+            submission_id(string): 投稿 ID
+        '''
+        submission = self._submissions_cache.get(submission_id)
+        if not submission:
+            yield f"[ERROR] 未找到投稿 ID: {submission_id}"
+            return
+
+        if submission.get("status") != "pending":
+            status_text = {"pending": "待审核", "approved": "已批准", "rejected": "已拒绝"}.get(
+                submission.get("status"), submission.get("status")
+            )
+            yield f"[ERROR] 投稿状态为「{status_text}」，只有待审核的投稿才能撤回"
+            return
+
+        # 验证投稿者身份
+        user_id = (
+            getattr(event, 'user_id', None) or
+            getattr(event, 'sender_id', None) or
+            getattr(event, 'from_id', None) or
+            getattr(event, 'user_id_holder', None)
+        )
+        sub_user_id = submission.get("user_id")
+        if user_id is not None and sub_user_id is not None:
+            if str(user_id) != str(sub_user_id):
+                yield f"[ERROR] 您只能撤回自己的投稿。该投稿由用户 {sub_user_id} 提交"
+                return
+
+        title = submission.get("title", "未知")
+        del self._submissions_cache[submission_id]
+        self._save_submissions()
+
+        yield f"[OK] 投稿《{title}》(ID: {submission_id}) 已撤回"
+
+    @filter.llm_tool(name="ai_review_submission")
+    @require_admin
+    async def ai_review_submission(self, event, submission_id: str):
+        '''手动触发对指定投稿的 AI 初审评估。需要主人权限。
+
+        当 AI 初审未启用或需要重新评估时，可使用此工具手动触发 AI 初审。
+        初审结果会保存到投稿记录中，并可通过 review_submission 查看。
+
+        Args:
+            submission_id(string): 投稿 ID
+        '''
+        submission = self._submissions_cache.get(submission_id)
+        if not submission:
+            yield f"[ERROR] 未找到投稿 ID: {submission_id}"
+            return
+
+        yield f"正在对投稿《{submission.get('title', '未知')}》进行 AI 初审，请稍候……"
+
+        review_result = await self._perform_ai_review(submission)
+        self._store_ai_review_result(submission_id, review_result)
+
+        review_text = self._format_ai_review_result(review_result)
+        if review_text:
+            yield review_text
+        else:
+            yield "[ERROR] AI 初审未能生成有效结果，请稍后重试或进行人工审核。"
+
+    @filter.llm_tool(name="submission_stats")
+    @require_admin
+    async def submission_stats(self, event):
+        '''获取投稿统计概览。需要主人权限。
+
+        返回待审核、已批准、已拒绝的投稿数量汇总。
+        '''
+        if not self._submissions_cache:
+            yield "[INFO] 暂无投稿记录"
+            return
+
+        stats = self._get_submission_stats()
+        result = [
+            "📊 **投稿统计**",
+            "",
+            f"| 状态 | 数量 |",
+            f"|------|------|",
+            f"| ⏳ 待审核 | {stats['pending']} |",
+            f"| ✅ 已批准 | {stats['approved']} |",
+            f"| ❌ 已拒绝 | {stats['rejected']} |",
+            f"| **合计** | **{stats['total']}** |",
+        ]
+        yield "\n".join(result)
+
+    # ========================================================================
+    # 进阶语法 LLM 工具
+    # ========================================================================
+
+    def _get_enabled_syntax_features(self) -> dict:
+        """获取当前启用的进阶语法功能列表
+
+        根据配置项 enable_advanced_syntax 和各子项开关，返回已启用的功能元数据。
+        """
+        # 主开关关闭时，不返回任何功能
+        if not self.config.get("enable_advanced_syntax", True):
+            return {}
+
+        enabled = {}
+        for feat_id, feat in ADVANCED_SYNTAX_FEATURES.items():
+            if self.config.get(feat["key"], True):
+                enabled[feat_id] = feat
+        return enabled
+
+    def _format_syntax_menu(self, enabled: dict) -> str:
+        """格式化进阶语法功能菜单
+
+        Args:
+            enabled: 已启用的功能字典
+
+        Returns:
+            格式化的功能菜单文本
+        """
+        if not enabled:
+            return "[INFO] 进阶语法功能未启用。请在插件配置中开启 `enable_advanced_syntax` 开关。"
+
+        lines = ["📋 **Firefly 博客进阶语法功能菜单**\n"]
+
+        # 按分类分组
+        by_category: dict = {}
+        for feat_id, feat in enabled.items():
+            cat = feat["category"]
+            if cat not in by_category:
+                by_category[cat] = []
+            by_category[cat].append((feat_id, feat))
+
+        for cat, items in by_category.items():
+            lines.append(f"### {cat}")
+            for feat_id, feat in items:
+                disabled = not self.config.get(feat["key"], True)
+                status = "✅" if not disabled else "⏸️"
+                lines.append(f"\n**{status} {feat['name']}** (`{feat_id}`)")
+                lines.append(f"  语法: `{feat['syntax']}`")
+                lines.append(f"  ✅ 优点: {'; '.join(feat['pros'][:2])}")
+                lines.append(f"  ⚠️ 缺点: {'; '.join(feat['cons'][:2])}")
+            lines.append("")
+
+        lines.append("---")
+        lines.append("使用 `get_syntax_guide` 工具可获取特定语法的详细使用指南。")
+        return "\n".join(lines)
+
+    @filter.llm_tool(name="list_advanced_syntax")
+    async def list_advanced_syntax(self, event):
+        '''列出 Firefly 博客支持的所有进阶 Markdown 语法功能。
+
+        返回当前已启用的进阶语法功能菜单，包含每个功能的名称、语法示例、
+        优点和缺点。用户可根据此菜单选择适合的语法增强文章表现力。
+
+        如果主开关 `enable_advanced_syntax` 未开启，此工具将返回提示信息。
+        '''
+        enabled = self._get_enabled_syntax_features()
+        yield self._format_syntax_menu(enabled)
+
+    @filter.llm_tool(name="get_syntax_guide")
+    async def get_syntax_guide(self, event, syntax_id: str):
+        '''获取指定进阶语法的详细使用指南。
+
+        Args:
+            syntax_id(string): 语法功能 ID。可选值：github_card（GitHub 仓库卡片）、
+                admonitions（提醒框）、spoiler（剧透文本）、image_grid（图片画廊网格）、
+                code_blocks（代码块进阶）、mermaid（Mermaid 图表）、
+                plantuml（PlantUML 图表）、katex（KaTeX 数学公式）
+
+        Returns:
+            包含语法说明、示例代码和详细使用指南的完整文档。
+            如果该语法功能未启用，会返回提示信息。
+        '''
+        if not self.config.get("enable_advanced_syntax", True):
+            yield "[INFO] 进阶语法功能未启用，请在插件配置中开启 `enable_advanced_syntax` 开关。"
+            return
+
+        feat = ADVANCED_SYNTAX_FEATURES.get(syntax_id)
+        if not feat:
+            valid_ids = ", ".join(f"`{k}`" for k in ADVANCED_SYNTAX_FEATURES)
+            yield f"[ERROR] 未知的语法 ID `{syntax_id}`。可选值：{valid_ids}"
+            return
+
+        if not self.config.get(feat["key"], True):
+            yield f"[INFO] 语法功能「{feat['name']}」当前未启用。请在插件配置中开启 `{feat['key']}` 开关。"
+            return
+
+        lines = [
+            f"## {feat['name']} 使用指南",
+            f"",
+            f"**分类**: {feat['category']}",
+            f"",
+            f"### 优点",
+        ]
+        for p in feat["pros"]:
+            lines.append(f"- ✅ {p}")
+
+        lines.append("")
+        lines.append("### 缺点")
+        for c in feat["cons"]:
+            lines.append(f"- ⚠️ {c}")
+
+        lines.append("")
+        lines.append("### 基本语法")
+        lines.append(f"```\n{feat['syntax']}\n```")
+
+        lines.append("")
+        lines.append("### 示例")
+        lines.append(f"```\n{feat['example']}\n```")
+
+        lines.append("")
+        lines.append("### 详细指南")
+        lines.append(feat["guide"])
+
+        yield "\n".join(lines)
+
     # ========================================================================
     # 显式指令注册（用户可直接使用的命令）
     # ========================================================================
@@ -2410,7 +3228,11 @@ class FireflyBlogManager(Star):
     @filter.command("博客搜索", alias=["搜索文章"], priority=5)
     @require_blog_manager
     async def cmd_search_posts(self, event, keyword: str):
-        """搜索博客文章"""
+        """搜索博客文章
+
+        Args:
+            keyword(string): 搜索关键词，按标题/分类/标签匹配
+        """
         posts = await self.blog_manager.list_posts()
         results = []
         keyword_lower = keyword.lower()
@@ -2421,6 +3243,141 @@ class FireflyBlogManager(Star):
             yield event.plain_result(f"[INFO] 未找到包含「{keyword}」的文章")
         else:
             yield event.plain_result(self._format_post_list(results))
+
+    @filter.command("博客投稿", alias=["提交投稿", "投稿文章"], priority=5)
+    @require_blog_manager
+    async def cmd_submit_post(self, event, title: str = ""):
+        """提交文章投稿。
+
+        Args:
+            title(string): 文章标题，正文内容通过后续消息或分号分隔提供
+
+        用法: /博客投稿 标题;正文内容
+        或者: /博客投稿 标题
+               正文内容（换行输入）
+
+        所有用户均可使用此命令提交投稿，管理员审核后决定是否发布。
+        """
+        if not title:
+            # 尝试从消息中提取标题
+            message = getattr(event, 'message', '') or ''
+            if not message.strip():
+                yield event.plain_result(
+                    "[ERROR] 请提供投稿标题和内容。\n"
+                    "用法: /博客投稿 标题\n"
+                    "     正文内容"
+                )
+                return
+            # 尝试解析：第一行作为标题
+            lines = message.strip().split('\n', 1)
+            title = lines[0].strip()
+            content = lines[1].strip() if len(lines) > 1 else ""
+            if not title:
+                yield event.plain_result("[ERROR] 请提供投稿标题")
+                return
+        else:
+            # title 参数由命令解析提供，正文需从消息中提取
+            message = getattr(event, 'message', '') or ''
+            # 去掉命令前缀，找到 title 后的内容
+            parts = message.split(title, 1)
+            content = parts[1].strip() if len(parts) > 1 else ""
+
+        if not content:
+            yield event.plain_result(
+                "[ERROR] 请提供投稿内容。\n"
+                "用法: /博客投稿 标题\n"
+                "     正文内容（支持 Markdown 语法）"
+            )
+            return
+
+        import uuid
+        import time
+
+        # 获取用户信息
+        author_name = (
+            getattr(event, 'sender_name', None) or
+            getattr(event, 'user_name', None) or
+            getattr(event, 'nickname', None) or "匿名用户"
+        )
+        user_id = (
+            getattr(event, 'user_id', None) or
+            getattr(event, 'sender_id', None) or
+            getattr(event, 'from_id', None) or
+            getattr(event, 'user_id_holder', None) or ""
+        )
+
+        submission_id = uuid.uuid4().hex[:12]
+        sub = {
+            "id": submission_id,
+            "title": title.strip(),
+            "content": content.strip(),
+            "author_name": str(author_name),
+            "user_id": str(user_id) if user_id else "",
+            "submit_time": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "status": "pending",
+            "reject_reason": "",
+        }
+        self._submissions_cache[submission_id] = sub
+        self._save_submissions()
+
+        yield event.plain_result(
+            f"[OK] 投稿已提交！\n"
+            f"   - 投稿 ID: `{submission_id}`\n"
+            f"   - 标题: {title.strip()}\n"
+            f"   - 状态: 待审核\n"
+            f"   - 使用 `/我的投稿` 查看您的投稿状态\n"
+            f"   - 管理员将在审核后决定是否发布"
+        )
+
+    @filter.command("我的投稿", alias=["我的提交", "投稿状态"], priority=5)
+    async def cmd_my_submissions(self, event):
+        """查看自己的投稿记录和状态"""
+        user_id = (
+            getattr(event, 'user_id', None) or
+            getattr(event, 'sender_id', None) or
+            getattr(event, 'from_id', None) or
+            getattr(event, 'user_id_holder', None) or ""
+        )
+        user_id = str(user_id) if user_id else ""
+
+        if not user_id:
+            yield event.plain_result("[ERROR] 无法识别您的用户身份，请稍后再试")
+            return
+
+        my_subs = [
+            Submission.from_dict(s) for s in self._submissions_cache.values()
+            if str(s.get("user_id", "")) == user_id
+        ]
+        if not my_subs:
+            yield event.plain_result(
+                "[INFO] 您还没有提交过投稿。\n"
+                "使用 `/博客投稿 标题` 来提交您的第一篇文章。"
+            )
+            return
+
+        my_subs.sort(key=lambda x: x.submit_time, reverse=True)
+        status_emoji = {"pending": "⏳", "approved": "✅", "rejected": "❌"}
+        status_text = {"pending": "待审核", "approved": "已批准", "rejected": "已拒绝"}
+
+        lines = ["📋 **我的投稿记录**", ""]
+        for sub in my_subs:
+            emoji = status_emoji.get(sub.status, "❓")
+            text = status_text.get(sub.status, sub.status)
+            lines.append(f"{emoji} {sub.title}")
+            lines.append(f"   ID: `{sub.id}` | 状态: {text} | 提交: {sub.submit_time}")
+            if sub.reject_reason:
+                lines.append(f"   ⚠️ 拒绝原因: {sub.reject_reason}")
+            lines.append("")
+
+        # 统计
+        stats = {"pending": 0, "approved": 0, "rejected": 0}
+        for sub in my_subs:
+            if sub.status in stats:
+                stats[sub.status] += 1
+        lines.append(f"---")
+        lines.append(f"汇总: {stats['pending']} 篇待审核 | {stats['approved']} 篇已发布 | {stats['rejected']} 篇已拒绝")
+
+        yield event.plain_result("\n".join(lines))
 
     @filter.command("博客环境", alias=["检查环境"], priority=5)
     @require_build_manager
@@ -2470,6 +3427,199 @@ class FireflyBlogManager(Star):
         """检查当前内存状态（公开命令）"""
         ok, msg = self._check_memory_status()
         yield event.plain_result(msg)
+
+    @filter.command("博客帮助", alias=["博客菜单", "博客命令", "firefly帮助", "firefly"], priority=1)
+    async def cmd_help(self, event):
+        """显示博客管理帮助菜单，列出所有可用命令和功能"""
+        has_admin = self.config.get("admin_umo", "").strip() != ""
+        is_admin = False
+        if has_admin:
+            ok, _ = self._check_admin_permission(event)
+            is_admin = ok
+
+        deploy_mode = self.config.get("deploy_mode", "local_build")
+        mode_map = {
+            "local_build": "本地构建 → SSH 部署到远端",
+            "remote_build": "远端服务器直接构建",
+            "local_only": "纯本地（博客与 AstrBot 同机）",
+        }
+        mode_desc = mode_map.get(deploy_mode, deploy_mode)
+
+        lines = [
+            f"🔥 **Firefly 博客管理插件 v1.3.5**",
+            "",
+            f"部署模式: `{deploy_mode}` ({mode_desc})",
+            "",
+            "---",
+            "",
+        ]
+
+        # ═══════════════════════════════════════════
+        # 一、 显式命令
+        # ═══════════════════════════════════════════
+        lines.append("## ⌨️ 显式命令")
+        lines.append("")
+
+        # ── 公开命令 ──
+        lines.append("### 📖 公开命令（所有人可用）")
+        lines.append("")
+        pub_cmds = [
+            ("/博客帮助", "博客菜单, 博客命令, firefly帮助, firefly", "显示此帮助菜单"),
+            ("/博客列表", "博客文章, 列出文章", "列出所有已发布的博客文章"),
+            ("/博客搜索 <关键词>", "搜索文章", "按标题/分类/标签搜索文章"),
+            ("/博客投稿 <标题>", "提交投稿, 投稿文章", "提交文章投稿草稿，等待管理员审核"),
+            ("/我的投稿", "我的提交, 投稿状态", "查看自己提交的投稿及其审核状态"),
+            ("/博客环境", "检查环境", "检查博客构建环境（Node.js、pnpm）是否就绪"),
+            ("/内存状态", "检查内存", "查看服务器当前内存使用情况"),
+        ]
+        for cmd, alias, desc in pub_cmds:
+            lines.append(f"| `{cmd}` | {desc} |")
+            if alias:
+                lines.append(f"| ↳ 别名 | `{alias}` |")
+        lines.append("")
+
+        # ── 管理员命令 ──
+        lines.append("### 🔒 管理员命令（仅管理员可用）")
+        if has_admin and not is_admin:
+            lines.append("> ⚠️ 当前用户不是管理员，以下命令不可用。")
+        lines.append("")
+        adm_cmds = [
+            ("/博客构建", "构建博客", "执行博客构建"),
+            ("/博客部署", "部署博客", "将构建产物部署到 Web 服务器"),
+            ("/博客投稿列表", "投稿列表, 待审核投稿", "列出所有待审核的文章投稿"),
+        ]
+        for cmd, alias, desc in adm_cmds:
+            lines.append(f"| `{cmd}` | {desc} |")
+            if alias:
+                lines.append(f"| ↳ 别名 | `{alias}` |")
+        lines.append("")
+
+        lines.append("---")
+        lines.append("")
+
+        # ═══════════════════════════════════════════
+        # 二、 LLM 工具（AI 自然语言能力）
+        # ═══════════════════════════════════════════
+        lines.append("## 🤖 AI 自然语言能力（LLM 工具）")
+        lines.append("")
+        lines.append("以下功能无需记忆命令，直接用自然语言对 AI 描述即可。")
+        lines.append("")
+
+        # ── 公开工具 ──
+        lines.append("### 📖 公开工具（所有人可用）")
+        lines.append("")
+        pub_tools = [
+            ("list_blog_posts", "列出所有文章"),
+            ("get_blog_post", "获取指定文章的完整内容"),
+            ("search_blog_posts", "按关键词搜索文章"),
+            ("check_blog_environment", "检查博客构建环境是否就绪"),
+            ("check_memory_status", "检查当前系统内存状态"),
+            ("check_build_resource", "检查构建所需资源（磁盘+内存）"),
+            ("get_build_config", "查看当前构建配置（内存阈值、并发等）"),
+            ("submit_post_draft", "提交文章投稿草稿"),
+            ("retract_submission", "撤回自己提交的待审核投稿"),
+            ("list_advanced_syntax", "列出所有可用的进阶 Markdown 语法"),
+            ("get_syntax_guide", "获取指定进阶语法的详细使用指南"),
+        ]
+        for tool_name, desc in pub_tools:
+            lines.append(f"| `{tool_name}` | {desc} |")
+        lines.append("")
+
+        # ── 管理员工具 ──
+        lines.append("### 🔒 管理员工具（仅管理员可用）")
+        if has_admin and not is_admin:
+            lines.append("> ⚠️ 当前用户不是管理员，以下工具不可用。")
+        lines.append("")
+        adm_tools = [
+            ("create_blog_post", "创建新文章（支持标签、分类、草稿、置顶等）"),
+            ("delete_blog_post", "删除指定文章"),
+            ("update_blog_post", "更新现有文章的内容或元数据"),
+            ("install_blog_dependencies", "安装博客构建所需的 npm 依赖"),
+            ("build_blog", "执行博客构建"),
+            ("deploy_blog", "将构建产物部署到 Web 服务器"),
+            ("auto_setup_blog", "一键自动检测环境并完成构建部署"),
+            ("build_and_deploy_blog", "一键构建并部署（连招）"),
+            ("list_post_submissions", "列出所有投稿，支持按状态过滤"),
+            ("review_submission", "查看指定投稿的详细内容"),
+            ("approve_submission", "批准投稿并发布为正式文章"),
+            ("reject_submission", "拒绝投稿（可附带拒绝原因）"),
+            ("delete_submission", "删除指定投稿记录（永久删除）"),
+            ("submission_stats", "查看投稿统计概览"),
+            ("ai_review_submission", "手动触发对指定投稿的 AI 初审评估"),
+        ]
+        for tool_name, desc in adm_tools:
+            lines.append(f"| `{tool_name}` | {desc} |")
+        lines.append("")
+
+        lines.append("---")
+        lines.append("")
+
+        # ═══════════════════════════════════════════
+        # 三、 进阶语法状态
+        # ═══════════════════════════════════════════
+        if self.config.get("enable_advanced_syntax", True):
+            lines.append("## 🎨 进阶语法（当前已启用）")
+            lines.append("")
+            by_cat: dict = {}
+            for fid, feat in ADVANCED_SYNTAX_FEATURES.items():
+                if self.config.get(feat["key"], True):
+                    cat = feat["category"]
+                    by_cat.setdefault(cat, []).append(feat["name"])
+            for cat, names in by_cat.items():
+                lines.append(f"- **{cat}**: {', '.join(names)}")
+            lines.append("")
+            lines.append("> 对 AI 说「有哪些进阶语法」或「教我写提醒框」即可获取详细指南。")
+        else:
+            lines.append("## 🎨 进阶语法（未启用）")
+            lines.append("")
+            lines.append("> 进阶语法功能未开启。在插件配置中打开 `enable_advanced_syntax` 即可使用。")
+        lines.append("")
+
+        lines.append("---")
+        lines.append("")
+
+        # ═══════════════════════════════════════════
+        # 四、 AI 初审状态
+        # ═══════════════════════════════════════════
+        if self.config.get("enable_ai_review", True):
+            lines.append("## AI 初审（当前已启用）")
+            lines.append("")
+            lines.append("AI 初审会在每次有新投稿提交时自动运行，从内容质量、格式规范、")
+            lines.append("完整性等维度评估文章，并给出过审/打回建议。")
+            lines.append("")
+            lines.append("- 投稿列表中会展示每篇投稿的 AI 初审状态")
+            lines.append("- 查看投稿详情时可以看到完整的 AI 评估结果")
+            lines.append("- 管理员可使用 `ai_review_submission` 手动重新触发 AI 初审")
+            lines.append("")
+        else:
+            lines.append("## AI 初审（未启用）")
+            lines.append("")
+            lines.append("> AI 初审功能未开启。在插件配置中打开 `enable_ai_review` 即可使用。")
+            lines.append("> 开启后，新投稿提交时会自动调用 AI 进行内容质量评估。")
+        lines.append("")
+
+        lines.append("---")
+        lines.append("")
+
+        # ═══════════════════════════════════════════
+        # 五、 快速上手
+        # ═══════════════════════════════════════════
+        lines.append("## 💡 快速上手")
+        lines.append("")
+        lines.append("试试对 AI 说这些话：")
+        lines.append("")
+        lines.append('- "帮我创建一篇关于 Docker 入门的文章"')
+        lines.append('- "列出博客上所有文章"')
+        lines.append('- "帮我检查一下博客环境是否正常"')
+        lines.append('- "构建并部署博客"')
+        lines.append('- "帮我看看有哪些投稿需要审核"')
+        lines.append('- "帮我提交一篇投稿"')
+        lines.append('- "查看我的投稿状态"')
+        if self.config.get("enable_advanced_syntax", True):
+            lines.append('- "有哪些进阶语法可以用？"')
+            lines.append('- "教我写一个 Mermaid 流程图"')
+
+        yield event.plain_result("\n".join(lines))
 
     # ========================================================================
     # 生命周期管理

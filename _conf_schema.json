@@ -20,7 +20,7 @@
     "description": "运行 Firefly 博客或 Web 服务器的远程服务器 IP。local_build 和 remote_build 模式下必填"
   },
   "server_port": {
-    "type": "int",
+    "type": "integer",
     "description": "远程服务器的 SSH 端口",
     "default": 22
   },
@@ -42,6 +42,16 @@
     "type": "string",
     "description": "密码认证时必填，SSH 登录密码"
   },
+  "ssh_known_hosts_path": {
+    "type": "string",
+    "description": "SSH known_hosts 文件路径。用于验证远程服务器身份，防止中间人攻击。留空则使用默认路径 ~/.ssh/known_hosts",
+    "default": ""
+  },
+  "ssh_strict_host_key_checking": {
+    "type": "boolean",
+    "description": "是否启用严格的 SSH 主机密钥验证。关闭时使用 accept-new 模式（首次连接自动接受，后续变更拒绝），比完全禁用更安全",
+    "default": true
+  },
   "remote_blog_root": {
     "type": "string",
     "description": "remote_build 模式下，远端服务器上 Firefly 博客项目的根目录",
@@ -53,17 +63,17 @@
     "default": "/var/www/firefly"
   },
   "build_memory_threshold": {
-    "type": "int",
+    "type": "integer",
     "description": "构建内存阈值（MB）。当可用内存低于此值时，插件会自动跳过构建并提示用户。建议设置为 1536（1.5GB），即 Firefly 构建所需的最低内存",
     "default": 1536
   },
   "build_memory_limit": {
-    "type": "int",
+    "type": "integer",
     "description": "构建内存限制（MB）。设置为 0 表示不限制。当设置为非零值时，会在构建命令中添加内存限制参数",
     "default": 0
   },
   "allow_build_concurrent": {
-    "type": "bool",
+    "type": "boolean",
     "description": "是否允许并发构建。设置为 false 时，同一时间只允许一个构建任务执行，避免内存竞争",
     "default": false
   },
@@ -71,5 +81,55 @@
     "type": "string",
     "description": "管理员的统一消息来源标识（UMO）。只有 UMO 匹配此值的用户才能使用管理员级别的功能（构建、部署等）。支持两种配置格式：1) 仅用户ID（推荐）：直接填写QQ号，如 123456789；2) 完整UMO格式：platform:user_id，如 onebot:123456789",
     "default": ""
+  },
+  "enable_advanced_syntax": {
+    "type": "boolean",
+    "description": "是否启用进阶 Markdown 语法功能。开启后，LLM 可在创建/更新文章时使用 Firefly 博客支持的进阶语法增强文章表现力，包括图表、数学公式、提醒框等",
+    "default": true
+  },
+  "advanced_syntax_github_card": {
+    "type": "boolean",
+    "description": "【GitHub 仓库卡片】优点：可在文章中嵌入 GitHub 仓库动态信息卡片，展示 Star 数、描述等，适合技术博客引用开源项目；缺点：依赖 GitHub API 可用性，离线环境无法渲染",
+    "default": true
+  },
+  "advanced_syntax_admonitions": {
+    "type": "boolean",
+    "description": "【提醒框 (Admonitions)】优点：支持 NOTE/TIP/IMPORTANT/WARNING/CAUTION 等多种类型，适合突出重要信息、注意事项、警告等；缺点：使用过多会导致文章视觉碎片化，降低阅读流畅性",
+    "default": true
+  },
+  "advanced_syntax_spoiler": {
+    "type": "boolean",
+    "description": "【剧透文本】优点：可隐藏敏感或剧透内容，用户点击才显示，增强互动性，Markdown 语法仍可内嵌；缺点：移动端触控体验不佳，被隐藏内容可能被搜索引擎忽略",
+    "default": true
+  },
+  "advanced_syntax_image_grid": {
+    "type": "boolean",
+    "description": "【图片画廊网格】优点：可将 2-4 张图片并排展示，自动裁剪对齐，适合照片对比、画廊展示；缺点：比例不一致的图片会被裁剪，完整内容需点击灯箱查看",
+    "default": true
+  },
+  "advanced_syntax_code_blocks": {
+    "type": "boolean",
+    "description": "【代码块进阶 (Expressive Code)】优点：支持编辑器/终端框架、行号、行高亮标记(diff/ins/del)、可折叠区域、自动换行等，适合技术教程；缺点：语法复杂，新手学习成本高，部分功能需在代码块元数据中配置",
+    "default": true
+  },
+  "advanced_syntax_mermaid": {
+    "type": "boolean",
+    "description": "【Mermaid 图表】优点：用纯文本生成流程图、时序图、甘特图、类图、状态图、饼图，适合技术文档；缺点：复杂图表语法冗长， 不支持所有图表类型，渲染依赖客户端 JS",
+    "default": true
+  },
+  "advanced_syntax_plantuml": {
+    "type": "boolean",
+    "description": "【PlantUML 图表】优点：支持活动图、用例图、组件图、部署图、ER图、时序图、C4架构图，比 Mermaid 更丰富；缺点：依赖外部 PlantUML 服务器渲染 SVG，内网环境可能需要自建服务",
+    "default": true
+  },
+  "advanced_syntax_katex": {
+    "type": "boolean",
+    "description": "【KaTeX 数学公式】优点：支持行内和块级数学公式，渲染速度快，支持矩阵、极限、求和、化学方程式等；缺点：仅支持 LaTeX 数学模式子集，不支持 amsmath 的某些高级宏",
+    "default": true
+  },
+  "enable_ai_review": {
+    "type": "boolean",
+    "description": "是否启用 AI 初审功能。开启后，每当有新投稿提交时，AI 会自动对投稿内容进行初审评估（内容质量、格式规范、完整性等），并给出过审/打回建议。管理员可在审核时直接查看 AI 初审结果，大幅提升审核效率",
+    "default": true
   }
 }

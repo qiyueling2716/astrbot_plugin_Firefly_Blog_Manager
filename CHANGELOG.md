@@ -2,6 +2,30 @@
 
 所有显著变更都会记录在此文件。
 
+## [1.4.0] - 2026-06-27
+
+### 新增
+
+- **投稿系统完善**：新增 `Submission` 数据模型，支持投稿持久化缓存；新增 `delete_submission`、`retract_submission`、`submission_stats` LLM 工具；新增 `/博客投稿` 和 `/我的投稿` 显式指令；投稿列表支持按状态筛选
+- **AI 初审功能**：新增 `enable_ai_review` 配置项，开启后投稿提交时自动调用 LLM 进行内容质量评估（评分、优点、问题、改进建议），管理员可直接查看初审结果决定过审或复审；新增 `ai_review_submission` 手动触发初审工具
+- **进阶语法支持**：新增 `enable_advanced_syntax` 总开关及 8 个子开关（GitHub 卡片、Admonitions、Spoiler、图片画廊、Expressive Code、Mermaid、PlantUML、KaTeX），每个子开关标注优劣；新增 `list_advanced_syntax` 和 `get_syntax_guide` LLM 工具
+- **帮助菜单**：新增 `/博客帮助` 显式指令，展示所有 LLM 工具、命令、权限级别、部署模式和快速上手示例
+
+### 安全修复
+
+- **SSH 主机密钥验证**：移除 `known_hosts=None`，恢复 asyncssh 默认主机密钥验证；新增 `ssh_known_hosts_path` 配置项；`StrictHostKeyChecking` 从 `no` 改为 `yes`/`accept-new` 可配置，默认启用严格验证
+- **密码安全**：密码不再通过 `export SSHPASS` 环境变量传递，改为写入临时文件（权限 `0o600`）通过 `sshpass -f` 读取，执行后自动删除，避免密码出现在进程列表和 shell 命令中
+- **命令注入防护**：新增 `_validate_shell_command()` 检测 `$(...)` 和反引号命令替换；所有部署命令中的用户可控参数使用 `shlex.quote()` 标准转义
+- **日志脱敏**：新增 `_sanitize_command()` 函数，所有包含命令的日志输出均过滤密码等敏感信息；SSH 连接日志不再记录主机名和端口
+- **路径遍历防护**：`_validate_path()` 使用 `os.path.realpath()` 规范化路径，防止 `../` 路径遍历攻击
+- **文件权限显式设置**：`write_file` 和 `_save_submissions` 写入后调用 `os.chmod` 设置 `0o644`，投稿缓存文件同理
+- **错误信息脱敏**：命令执行异常和 AI 初审异常不再返回 `str(e)` 详细信息给用户，改为通用提示消息，详细错误仅记录在日志中
+- **权限信息保护**：权限拒绝时不再返回用户 UMO 标识；未配置 `admin_umo` 时启动输出警告日志
+- **UUID 增强**：投稿 ID 从 8 位 hex 增加到 12 位 hex，碰撞概率降低约 1600 万倍
+
+
+---
+
 ## [1.3.4] - 2026-06-23
 
 ### 修复

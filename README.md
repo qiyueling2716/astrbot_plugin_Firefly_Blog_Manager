@@ -15,6 +15,29 @@
 | 更新文章 | "把 Docker 快速入门 改成 Kubernetes 入门" |
 | 搜索文章 | "搜索包含 Docker 的文章" |
 
+### 投稿系统
+
+| 操作 | 说明 |
+|------|------|
+| 提交投稿 | 任何人可提交文章草稿，管理员审核后发布 |
+| 查看投稿 | 管理员查看所有投稿列表及详情 |
+| 批准/拒绝 | 管理员审核通过后发布，或拒绝并附修改意见 |
+| 撤回投稿 | 投稿者可撤回自己提交的投稿 |
+| AI 初审 | 开启后可自动调用 LLM 评估投稿质量，给出评分和建议 |
+
+### 进阶语法
+
+| 语法 | 说明 |
+|------|------|
+| GitHub 仓库卡片 | 嵌入 GitHub 仓库动态信息 |
+| Admonitions | 多种提醒框（NOTE/TIP/IMPORTANT/WARNING/CAUTION） |
+| Spoiler | 可折叠的剧透文本 |
+| 图片画廊 | 2-4 张图片并排展示 |
+| Expressive Code | 代码块行号、高亮、折叠 |
+| Mermaid | 流程图、时序图、甘特图等 |
+| PlantUML | 活动图、用例图、C4 架构图等 |
+| KaTeX | 数学公式渲染 |
+
 ### 构建与部署
 
 | 操作 | 说明 |
@@ -31,8 +54,11 @@
 
 | 指令 | 别名 | 权限 | 说明 |
 |------|------|------|------|
+| `/博客帮助` | `博客菜单`、`帮助` | 公开 | 查看所有可用指令和工具 |
 | `/博客列表` | `博客文章`、`列出文章` | 公开 | 列出所有博客文章 |
 | `/博客搜索 <关键词>` | `搜索文章` | 公开 | 搜索博客文章 |
+| `/博客投稿` | `投稿`、`提交投稿` | 公开 | 提交文章投稿 |
+| `/我的投稿` | `我的草稿` | 公开 | 查看自己提交的投稿状态 |
 | `/博客环境` | `检查环境` | 管理员 | 检查 Node.js 和 pnpm 是否安装 |
 | `/博客构建` | `构建博客` | 管理员 | 构建博客（占用约 1.5GB 内存） |
 | `/博客部署` | `部署博客` | 管理员 | 部署博客到服务器 |
@@ -121,6 +147,8 @@ pip install -r requirements.txt
 | `auth_type` | 下拉 | `key`（密钥）或 `password`（密码） | `local_build`, `remote_build` |
 | `private_key_path` | 字符串 | 本地私钥文件绝对路径 | `key` 认证时 |
 | `password` | 字符串 | SSH 登录密码 | `password` 认证时 |
+| `ssh_known_hosts_path` | 字符串 | SSH known_hosts 文件路径，留空使用默认 `~/.ssh/known_hosts` | `local_build`, `remote_build` |
+| `ssh_strict_host_key_checking` | 布尔 | 是否启用严格的 SSH 主机密钥验证，关闭时使用 `accept-new` | `local_build`, `remote_build` |
 | `remote_blog_root` | 字符串 | 远端服务器上 Firefly 博客根目录 | `remote_build` |
 | `remote_web_root` | 字符串 | 远端 Web 服务器根目录 | `local_build`, `remote_build` |
 | `build_memory_threshold` | 整数 | 构建内存阈值（MB），默认 1536 | 全部 |
@@ -129,6 +157,9 @@ pip install -r requirements.txt
 | `allow_only_owner` | 布尔 | 是否只允许管理员使用非构建类工具，默认 false | 全部 |
 | `owner_user_id` | 字符串 | 主人用户 ID（回退配置），插件优先使用 AstrBot 框架管理员系统 | 全部 |
 | `admin_users` | 列表 | 管理员用户 ID 列表（回退配置），插件优先使用 AstrBot 框架管理员系统 | 全部 |
+| `enable_advanced_syntax` | 布尔 | 是否启用进阶 Markdown 语法功能，默认开启 | 全部 |
+| `advanced_syntax_*` | 布尔 | 8 个进阶语法子开关（github_card / admonitions / spoiler / image_grid / code_blocks / mermaid / plantuml / katex），默认均开启 | 全部 |
+| `enable_ai_review` | 布尔 | 是否启用 AI 初审功能，开启后投稿提交时自动评估内容质量，默认开启 | 全部 |
 
 ### 权限控制说明
 
@@ -137,8 +168,8 @@ pip install -r requirements.txt
 | 工具类型 | 权限要求 | 说明 |
 |----------|----------|------|
 | **构建相关工具** | 始终需要管理员权限 | `build_blog`、`deploy_blog`、`build_and_deploy_blog`、`install_blog_dependencies`、`auto_setup_blog` 等工具始终只能由管理员使用 |
-| **投稿工具** | 任何人都可以使用 | `submit_post_draft` 工具允许任何人提交投稿，无需权限验证 |
-| **投稿审核工具** | 始终需要管理员权限 | `list_post_submissions`、`review_submission`、`approve_submission`、`reject_submission` 等工具始终只能由管理员使用 |
+| **投稿工具** | 任何人都可以使用 | `submit_post_draft`、`retract_submission` 工具允许任何人提交和撤回投稿，无需权限验证 |
+| **投稿审核工具** | 始终需要管理员权限 | `list_post_submissions`、`review_submission`、`approve_submission`、`reject_submission`、`delete_submission`、`ai_review_submission` 等工具始终只能由管理员使用 |
 | **文章管理工具** | 受 `allow_only_owner` 配置控制 | `create_blog_post`、`delete_blog_post`、`update_blog_post` 等工具在 `allow_only_owner=true` 时仅管理员可用 |
 
 **权限验证顺序**：
@@ -156,6 +187,29 @@ allow_only_owner: true
 # owner_user_id: ""  # 留空即可，插件会自动使用 AstrBot 的主人 ID
 # admin_users: []     # 留空即可，插件会自动使用 AstrBot 的管理员列表
 ```
+
+### AI 初审功能
+
+开启 `enable_ai_review` 后，每次有新投稿提交时，插件会自动调用 LLM 对投稿内容进行初审评估，包括：
+
+- **内容质量评分**（0-10 分）
+- **优点分析**：文章亮点
+- **问题发现**：格式、完整性、可读性等问题
+- **改进建议**：具体优化方向
+- **过审/打回建议**：AI 综合判断是否建议发布
+
+初审结果会持久化存储，管理员在查看投稿列表时可以看到每篇投稿的 AI 初审状态，查看详情时可以看到完整的评估报告。管理员可选择：
+
+1. **过审**：直接批准发布
+2. **复审**：查看全文后再决定是否过审
+
+关闭 AI 初审后，新投稿仅发送提醒通知，管理员需自行查看并审核。
+
+### 进阶语法
+
+开启 `enable_advanced_syntax` 后，LLM 在创建文章时可使用 Firefly 博客支持的进阶 Markdown 语法增强文章表现力。每个语法子项均可独立开关，便于精确控制。
+
+如需了解各语法的使用方法，可在对话中询问 `list_advanced_syntax` 或 `get_syntax_guide`。详见 [Firefly 博客文章示例](https://firefly.ysysaily.xyz/archive/?category=文章示例)。
 
 ### 路径配置详解
 
@@ -208,6 +262,8 @@ ls -la /var/www/html
    ssh-copy-id -i ~/.ssh/id_ed25519.pub user@服务器IP
    ```
 3. 配置 `auth_type` 为 `key`，`private_key_path` 填私钥路径
+
+**注意！请确保目标服务器允许了密钥登陆！**
 
 ### 密码认证
 
@@ -411,6 +467,9 @@ Firefly 是静态博客，修改文章后必须重新构建并部署才会生效
 
 - 文章格式：完整支持 Firefly 的 YAML Front-matter
 - 远程操作：基于 asyncssh，异步非阻塞，带连接保活和自动重连
+- 主机密钥验证：默认启用 SSH 主机密钥验证，防止中间人攻击
+- 密码安全：密码通过临时文件传递，不出现在进程列表和 shell 命令中
+- 命令注入防护：部署命令参数使用 `shlex.quote()` 转义，执行前检测危险 shell 模式
 - 元数据解析：PyYAML
 - 构建超时：10 分钟
 - 部署超时：5 分钟
