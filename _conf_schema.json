@@ -20,7 +20,7 @@
     "description": "运行 Firefly 博客或 Web 服务器的远程服务器 IP。local_build 和 remote_build 模式下必填"
   },
   "server_port": {
-    "type": "integer",
+    "type": "int",
     "description": "远程服务器的 SSH 端口",
     "default": 22
   },
@@ -63,12 +63,12 @@
     "default": "/var/www/firefly"
   },
   "build_memory_threshold": {
-    "type": "integer",
+    "type": "int",
     "description": "构建内存阈值（MB）。当可用内存低于此值时，插件会自动跳过构建并提示用户。建议设置为 1536（1.5GB），即 Firefly 构建所需的最低内存",
     "default": 1536
   },
   "build_memory_limit": {
-    "type": "integer",
+    "type": "int",
     "description": "构建内存限制（MB）。设置为 0 表示不限制。当设置为非零值时，会在构建命令中添加内存限制参数",
     "default": 0
   },
