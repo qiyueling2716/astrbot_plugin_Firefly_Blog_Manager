@@ -1,5 +1,5 @@
 """
-AstrBot Firefly 博客管理插件 v1.4.0
+AstrBot Firefly 博客管理插件 v1.8.7
 
 通过 AI 指令管理 Firefly 博客的文章和部署。
 支持三种部署模式：
@@ -12,7 +12,9 @@ Firefly 博客基于 Astro 框架，文章以 Markdown 文件形式存储，
 构建产物位于 dist/ 目录，需部署到 Web 服务器。
 
 架构说明：
-- 采用分层抽象设计，命令执行器和文件系统都有本地/远程两种实现
+- 插件入口文件，仅包含插件主类（Star）、命令处理器和 LLM 工具
+- 核心逻辑按职责拆分到子模块：models / constants / common / executors /
+  filesystem / blog_manager / build_deploy
 - 通过依赖注入实现模式切换，核心逻辑与具体实现解耦
 - 所有工具函数均支持异步操作，避免阻塞主线程
 - 配置采用声明式定义，支持 WebUI 可视化配置
@@ -20,1636 +22,53 @@ Firefly 博客基于 Astro 框架，文章以 Markdown 文件形式存储，
 
 from __future__ import annotations
 
-import functools
+import json
 import os
 import posixpath
 import re
-import shlex
-import glob
 import shutil
-import asyncio
-from abc import ABC, abstractmethod
-from dataclasses import dataclass, field
-from datetime import datetime, date
-from enum import Enum
-from typing import Optional, Dict, List, Any, Tuple, Union
-import json
+import time
+import uuid
+from datetime import datetime
+from typing import List, Optional
 
-import yaml
+try:
+    import psutil
+except ImportError:
+    psutil = None
 
 from astrbot.api import logger, AstrBotConfig
 from astrbot.api.event import filter
 from astrbot.api.star import Context, Star, register
 
+from .blog_manager import BlogManager
+from .build_deploy import BuildDeployManager
+from .common import (
+    get_user_id,
+    is_firefly_blog_local,
+    parse_deploy_mode,
+    require_admin,
+    require_blog_manager,
+    require_build_manager,
+)
+from .constants import (
+    ADVANCED_SYNTAX_FEATURES,
+    DEFAULT_BLOG_ROOT,
+    PLUGIN_VERSION,
+)
+from .executors import LocalExecutor, RemoteExecutor
+from .filesystem import FileSystem, FilenameUtil, LocalFileSystem, RemoteFileSystem
+from .models import (
+    SUBMISSION_STATUS_BADGE,
+    SUBMISSION_STATUS_EMOJI,
+    SUBMISSION_STATUS_TEXT,
+    DeployMode,
+    PostInfo,
+    PostMetadata,
+    Submission,
+)
+from .webui import WebUIMixin
 
-# ============================================================================
-# 常量定义
-# ============================================================================
-
-DEFAULT_BLOG_ROOT = "/var/www/firefly"
-DEFAULT_WEB_ROOT = "/var/www/html"
-DEFAULT_SSH_PORT = 22
-BUILD_TIMEOUT = 600  # 10分钟
-DEPLOY_TIMEOUT = 300  # 5分钟
-SSH_KEEPALIVE_INTERVAL = 30
-SSH_KEEPALIVE_COUNT_MAX = 3
-
-# ============================================================================
-# 进阶语法功能元数据定义
-# ============================================================================
-
-ADVANCED_SYNTAX_FEATURES = {
-    "github_card": {
-        "name": "GitHub 仓库卡片",
-        "key": "advanced_syntax_github_card",
-        "category": "链接增强",
-        "pros": [
-            "可在文章中嵌入 GitHub 仓库动态信息卡片，展示 Star 数、Fork 数、描述等",
-            "自动从 GitHub API 获取最新数据，卡片内容始终为最新",
-            "适合技术博客引用开源项目，视觉效果专业",
-        ],
-        "cons": [
-            "依赖 GitHub API 可用性，离线环境无法渲染",
-            "每次页面加载都会发起 API 请求，增加加载时间",
-            "API 有频率限制，高流量博客可能触发限流",
-        ],
-        "syntax": '::github{repo="owner/repo"}',
-        "example": '::github{repo="CuteLeaf/Firefly"}',
-        "guide": "在 Markdown 中直接使用 `::github{repo=\"owner/repo\"}` 语法。"
-                "页面加载时，信息会从 GitHub API 获取并渲染为动态卡片。"
-                "适合在技术文章中引用开源项目。",
-    },
-    "admonitions": {
-        "name": "提醒框 (Admonitions)",
-        "key": "advanced_syntax_admonitions",
-        "category": "内容组织",
-        "pros": [
-            "支持 NOTE/TIP/IMPORTANT/WARNING/CAUTION 等多种类型，语义明确",
-            "可选 4 种主题：GitHub、Obsidian、VitePress、Docusaurus",
-            "适合突出重要信息、注意事项、警告等，提升文章可读性",
-        ],
-        "cons": [
-            "使用过多会导致文章视觉碎片化，降低阅读流畅性",
-            "不同主题语法略有差异，切换主题后需检查兼容性",
-            "Docusaurus 风格使用 `:::` 语法，与 GitHub 风格不兼容",
-        ],
-        "syntax": "> [!TYPE] 标题\n> 内容",
-        "example": "> [!NOTE] 注意\n> 这是一个重要提示。\n\n> [!WARNING] 警告\n> 此操作不可逆！",
-        "guide": "Firefly 支持 4 种提醒框主题（GitHub/Obsidian/VitePress/Docusaurus），"
-                "默认使用 GitHub 风格。基本语法：`> [!TYPE] 标题` + `> 内容`。"
-                "可用类型：NOTE、TIP、IMPORTANT、WARNING、CAUTION。"
-                "Obsidian 风格额外支持 abstract、info、todo、success、question、failure、danger、bug、example、quote。",
-    },
-    "spoiler": {
-        "name": "剧透文本",
-        "key": "advanced_syntax_spoiler",
-        "category": "内容组织",
-        "pros": [
-            "可隐藏敏感或剧透内容，用户点击才显示，增强互动性",
-            "支持内嵌 Markdown 语法（加粗、斜体等），灵活性高",
-            "适合隐藏答案、剧透、额外信息等",
-        ],
-        "cons": [
-            "移动端触控体验不佳（点击区域小），需要较大的点击目标",
-            "被隐藏内容可能被搜索引擎忽略，不利于 SEO",
-            "滥用会导致用户阅读体验下降",
-        ],
-        "syntax": ":spoiler[被隐藏的内容]",
-        "example": "答案：:spoiler[42]",
-        "guide": "使用 `:spoiler[内容]` 语法隐藏文本。"
-                "隐藏内容中支持 Markdown 格式，如 `:spoiler[**加粗**的秘密]`。"
-                "用户点击/触摸隐藏区域即可显示内容。",
-    },
-    "image_grid": {
-        "name": "图片画廊网格",
-        "key": "advanced_syntax_image_grid",
-        "category": "多媒体",
-        "pros": [
-            "可将 2-4 张图片并排展示，自动裁剪对齐，视觉整齐",
-            "响应式布局，自动适配不同屏幕尺寸",
-            "图注恒定底端对齐，适合照片对比、画廊展示",
-        ],
-        "cons": [
-            "比例不一致的图片会被裁剪（object-cover），完整内容需点击灯箱查看",
-            "仅支持 2-4 张图片，无法展示更多",
-            "被裁剪后部分图片内容不可见，建议使用相同比例的图片",
-        ],
-        "syntax": "[grid]\n![图片1](./img1.jpg)\n![图片2](./img2.jpg)\n[/grid]",
-        "example": "[grid]\n![示例一](./firefly1.avif)\n![示例二](./firefly2.avif)\n[/grid]",
-        "guide": "使用 `[grid]` 和 `[/grid]` 标签包裹图片。"
-                "支持 2-4 张图片并排，系统自动响应式布局。"
-                "同一行图片若比例不一致，会自动裁剪居中。"
-                "建议使用相同长宽比的图片。",
-    },
-    "code_blocks": {
-        "name": "代码块进阶 (Expressive Code)",
-        "key": "advanced_syntax_code_blocks",
-        "category": "代码展示",
-        "pros": [
-            "支持编辑器/终端框架，可设置文件名或终端标题",
-            "支持行号、行高亮标记(diff/ins/del)、行标签",
-            "支持可折叠区域、自动换行、ANSI 转义序列渲染",
-            "适合技术教程和代码演示",
-        ],
-        "cons": [
-            "语法复杂，配置项多，新手学习成本高",
-            "部分功能依赖代码块元数据（如 title=\"xxx\"、showLineNumbers 等），需额外记忆",
-            "Diff 语法与特定语言语法高亮混用时需注意兼容性",
-        ],
-        "syntax": "```lang title=\"文件名\" showLineNumbers\n// 代码\n```",
-        "example": '```js title="app.js" showLineNumbers\n// 第1行\nconsole.log("Hello")\n// 第3行 - 标记\n```',
-        "guide": "Firefly 使用 Expressive Code 渲染代码块。主要配置：\n"
-                "- `title=\"文件名\"` — 显示编辑器框架和文件名\n"
-                "- `title=\"Terminal window\"` — 终端框架样式\n"
-                "- `frame=\"none\"` — 无框架\n"
-                "- `showLineNumbers` — 显示行号\n"
-                "- 行标记：在代码块元数据中标注行号，如 `\"第3行\"` 或 `\"7-8\"`\n"
-                "- 标记类型：`mark`（默认蓝）、`ins`（绿色插入）、`del`（红色删除）\n"
-                "- diff 语法：以 `+`/`-` 开头自动识别为 diff 标记\n"
-                "- 折叠：在代码块中自动折叠样板代码",
-    },
-    "mermaid": {
-        "name": "Mermaid 图表",
-        "key": "advanced_syntax_mermaid",
-        "category": "图表绘制",
-        "pros": [
-            "用纯文本描述即可生成多种图表，无需外部工具",
-            "支持流程图、时序图、甘特图、类图、状态图、饼图",
-            "与 Markdown 原生集成，版本管理友好",
-        ],
-        "cons": [
-            "复杂图表语法冗长，维护成本高",
-            "不支持所有图表类型（如 ER 图、部署图需用 PlantUML）",
-            "渲染依赖客户端 JavaScript，某些阅读器不支持",
-        ],
-        "syntax": "```mermaid\n图表类型\n  语法描述\n```",
-        "example": "```mermaid\nflowchart TD\n  A[开始] --> B{条件}\n  B -->|是| C[结果1]\n  B -->|否| D[结果2]\n```",
-        "guide": "在代码块中指定 `mermaid` 语言即可。支持的图表类型：\n"
-                "- `flowchart TD/LR` — 流程图\n"
-                "- `sequenceDiagram` — 时序图\n"
-                "- `gantt` — 甘特图\n"
-                "- `classDiagram` — 类图\n"
-                "- `stateDiagram` — 状态图\n"
-                "- `pie` — 饼图\n\n"
-                "Mermaid 适合轻量级图表，如需更丰富的图表类型（ER图、C4图等），"
-                "请使用 PlantUML。",
-    },
-    "plantuml": {
-        "name": "PlantUML 图表",
-        "key": "advanced_syntax_plantuml",
-        "category": "图表绘制",
-        "pros": [
-            "图表类型比 Mermaid 更丰富：活动图、用例图、组件图、部署图、ER图、C4架构图",
-            "支持亮暗主题自动切换，缩放、拖拽和全屏交互",
-            "语法高度结构化，适合软件工程文档",
-        ],
-        "cons": [
-            "依赖外部 PlantUML 服务器渲染 SVG，内网环境可能需要自建服务",
-            "渲染速度比 Mermaid 慢（需要网络请求）",
-            "语法比 Mermaid 更复杂，学习曲线更陡",
-        ],
-        "syntax": "```plantuml\n@startuml\n  图表定义\n@enduml\n```",
-        "example": "```plantuml\n@startuml\nactor User\nUser -> (登录)\nUser -> (查看文章)\n@enduml\n```",
-        "guide": "在代码块中指定 `plantuml` 语言。Firefly 会在构建时编码并生成 SVG。\n"
-                "支持的图表类型：\n"
-                "- 活动图 (activity)\n"
-                "- 时序图 (sequence)\n"
-                "- 用例图 (usecase)\n"
-                "- 类图 (class)\n"
-                "- 组件图 (component)\n"
-                "- 部署图 (deployment)\n"
-                "- ER 图 (entity)\n"
-                "- 状态图 (state)\n"
-                "- C4 架构图\n\n"
-                "PlantUML 适合需要丰富图表类型的软件工程文档。",
-    },
-    "katex": {
-        "name": "KaTeX 数学公式",
-        "key": "advanced_syntax_katex",
-        "category": "学术/数学",
-        "pros": [
-            "渲染速度极快，不依赖外部服务",
-            "支持行内公式、块级公式、矩阵、极限、求和、化学方程式",
-            "适合数学、物理、计算机科学等技术博客",
-        ],
-        "cons": [
-            "仅支持 LaTeX 数学模式子集，不支持 amsmath 的某些高级宏",
-            "复杂公式占用较多垂直空间，可能影响阅读节奏",
-            "不支持 \newcommand 等自定义命令",
-        ],
-        "syntax": "$行内公式$ 或 $$块级公式$$",
-        "example": "欧拉公式：$e^{i\\pi} + 1 = 0$\n\n质能方程：$$E = mc^2$$",
-        "guide": "行内公式使用单 `$` 包裹，块级公式使用双 `$$` 包裹。\n"
-                "支持常见 LaTeX 数学语法：\n"
-                "- 分数：`\\frac{分子}{分母}`\n"
-                "- 矩阵：`\\begin{pmatrix} a & b \\\\ c & d \\end{pmatrix}`\n"
-                "- 求和：`\\sum_{n=1}^{\\infty}`\n"
-                "- 极限：`\\lim_{x \\to 0}`\n"
-                "- 化学方程式：`\\ce{CH4 + 2O2 -> CO2 + 2H2O}`\n\n"
-                "更多语法参考 KaTeX 官方文档。",
-    },
-}
-
-
-# ============================================================================
-# 部署模式枚举
-# ============================================================================
-
-class DeployMode(str, Enum):
-    """部署模式"""
-    LOCAL_BUILD = "local_build"      # 本地构建，SSH 部署到远端
-    REMOTE_BUILD = "remote_build"    # 远端直接构建
-    LOCAL_ONLY = "local_only"        # 纯本地（博客和 AstrBot 在同一台机器）
-
-
-# ============================================================================
-# 数据模型
-# ============================================================================
-
-@dataclass
-class PostMetadata:
-    """Firefly 博客文章元数据（对应 YAML Front-matter）"""
-    title: str = ""
-    published: str = ""
-    updated: str = ""
-    description: str = ""
-    image: str = ""
-    tags: list = field(default_factory=list)
-    category: str = ""
-    draft: bool = False
-    slug: str = ""
-    password: str = ""
-    password_hint: str = ""
-    lang: str = "zh-CN"
-    license_name: str = ""
-    license_url: str = ""
-    author: str = ""
-    source_link: str = ""
-    comment: bool = True
-    pinned: bool = False
-
-    def to_yaml(self) -> str:
-        """将元数据转换为 YAML Front-matter 格式"""
-        data: dict = {
-            "title": self.title,
-        }
-        
-        # 日期字段特殊处理：转换为 date 对象以确保 YAML 输出为日期类型
-        if self.published:
-            date_obj = self._parse_date(self.published)
-            if date_obj:
-                data["published"] = date_obj
-            else:
-                data["published"] = self.published
-        if self.updated:
-            date_obj = self._parse_date(self.updated)
-            if date_obj:
-                data["updated"] = date_obj
-            else:
-                data["updated"] = self.updated
-            
-        if self.description:
-            data["description"] = self.description
-        if self.image:
-            data["image"] = self.image
-        if self.tags:
-            data["tags"] = self.tags
-        if self.category:
-            data["category"] = self.category
-        if self.draft:
-            data["draft"] = True
-        if self.slug:
-            data["slug"] = self.slug
-        if self.password:
-            data["password"] = self.password
-        if self.password_hint:
-            data["passwordHint"] = self.password_hint
-        if self.lang != "zh-CN":
-            data["lang"] = self.lang
-        if self.license_name:
-            data["licenseName"] = self.license_name
-        if self.license_url:
-            data["licenseUrl"] = self.license_url
-        if self.author:
-            data["author"] = self.author
-        if self.source_link:
-            data["sourceLink"] = self.source_link
-        if not self.comment:
-            data["comment"] = False
-        if self.pinned:
-            data["pinned"] = True
-
-        # 使用自定义日期表示器确保日期正确输出
-        yaml_str = self._safe_dump_with_dates(data)
-        return f"---\n{yaml_str}---\n"
-
-    def _parse_date(self, date_str: str) -> Optional[date]:
-        """解析日期字符串为 datetime.date 对象
-        
-        Args:
-            date_str: 日期字符串
-            
-        Returns:
-            datetime.date 对象，如果解析失败返回 None
-        """
-        
-        # 尝试多种常见格式
-        formats = [
-            '%Y-%m-%d',      # 2024-01-01
-            '%Y/%m/%d',      # 2024/01/01
-            '%Y-%m-%d %H:%M:%S',  # 2024-01-01 12:00:00
-            '%Y/%m/%d %H:%M:%S',  # 2024/01/01 12:00:00
-            '%d-%m-%Y',      # 01-01-2024
-            '%d/%m/%Y',      # 01/01/2024
-        ]
-        
-        for fmt in formats:
-            try:
-                dt = datetime.strptime(date_str.strip(), fmt)
-                return dt.date()
-            except ValueError:
-                continue
-        
-        return None
-
-    def _safe_dump_with_dates(self, data: dict) -> str:
-        """安全地序列化数据，确保日期字段正确输出为日期类型"""
-        
-        class DateDumper(yaml.Dumper):
-            def represent_data(self, data):
-                if isinstance(data, date):
-                    return self.represent_scalar('tag:yaml.org,2002:timestamp', str(data))
-                return super().represent_data(data)
-        
-        return yaml.dump(data, allow_unicode=True, sort_keys=False, default_flow_style=False, Dumper=DateDumper)
-
-    @classmethod
-    def from_content(cls, content: str) -> tuple[PostMetadata, str]:
-        """从文章完整内容中解析元数据和正文，返回 (metadata, body)"""
-        metadata = cls()
-        body = content
-
-        if content.startswith("---"):
-            parts = content.split("---", 2)
-            if len(parts) >= 3:
-                try:
-                    data = yaml.safe_load(parts[1])
-                    if data and isinstance(data, dict):
-                        metadata.title = data.get("title", "")
-                        metadata.published = data.get("published", "")
-                        metadata.updated = data.get("updated", "")
-                        metadata.description = data.get("description", "")
-                        metadata.image = data.get("image", "")
-                        metadata.tags = data.get("tags", [])
-                        metadata.category = data.get("category", "")
-                        metadata.draft = data.get("draft", False)
-                        metadata.slug = data.get("slug", "")
-                        metadata.password = data.get("password", "")
-                        metadata.password_hint = data.get("passwordHint", "")
-                        metadata.lang = data.get("lang", "zh-CN")
-                        metadata.license_name = data.get("licenseName", "")
-                        metadata.license_url = data.get("licenseUrl", "")
-                        metadata.author = data.get("author", "")
-                        metadata.source_link = data.get("sourceLink", "")
-                        metadata.comment = data.get("comment", True)
-                        metadata.pinned = data.get("pinned", False)
-                    body = parts[2].strip()
-                except yaml.YAMLError as e:
-                    logger.warning(f"解析 Front-matter 失败: {e}")
-
-        return metadata, body
-
-
-@dataclass
-class PostInfo:
-    """文章信息摘要（用于列表展示）"""
-    filename: str
-    title: str
-    published: str
-    category: str
-    tags: list
-    draft: bool
-
-
-@dataclass
-class Submission:
-    """投稿数据模型"""
-    id: str
-    title: str
-    content: str
-    author_name: str = ""
-    author_email: str = ""
-    tags: str = ""
-    category: str = ""
-    description: str = ""
-    submit_time: str = ""
-    user_id: str = ""
-    status: str = "pending"  # pending / approved / rejected
-    reject_reason: str = ""
-    ai_review: Optional[dict] = None  # AI 初审结果
-
-    def to_dict(self) -> dict:
-        result = {
-            "id": self.id,
-            "title": self.title,
-            "content": self.content,
-            "author_name": self.author_name,
-            "author_email": self.author_email,
-            "tags": self.tags,
-            "category": self.category,
-            "description": self.description,
-            "submit_time": self.submit_time,
-            "user_id": self.user_id,
-            "status": self.status,
-            "reject_reason": self.reject_reason,
-        }
-        if self.ai_review is not None:
-            result["ai_review"] = self.ai_review
-        return result
-
-    @classmethod
-    def from_dict(cls, d: dict) -> "Submission":
-        return cls(
-            id=d.get("id", ""),
-            title=d.get("title", ""),
-            content=d.get("content", ""),
-            author_name=d.get("author_name", ""),
-            author_email=d.get("author_email", ""),
-            tags=d.get("tags", ""),
-            category=d.get("category", ""),
-            description=d.get("description", ""),
-            submit_time=d.get("submit_time", ""),
-            user_id=d.get("user_id", ""),
-            status=d.get("status", "pending"),
-            reject_reason=d.get("reject_reason", ""),
-            ai_review=d.get("ai_review"),
-        )
-
-
-# ============================================================================
-# 自定义异常类
-# ============================================================================
-
-class BlogManagerError(Exception):
-    """博客管理器基础异常"""
-    pass
-
-
-class ConfigurationError(BlogManagerError):
-    """配置错误"""
-    pass
-
-
-class BlogNotFoundError(BlogManagerError):
-    """博客目录未找到"""
-    pass
-
-
-class PostNotFoundError(BlogManagerError):
-    """文章未找到"""
-    pass
-
-
-class BuildError(BlogManagerError):
-    """构建错误"""
-    pass
-
-
-class DeployError(BlogManagerError):
-    """部署错误"""
-    pass
-
-
-class SSHConnectionError(BlogManagerError):
-    """SSH 连接错误"""
-    pass
-
-
-# ============================================================================
-# 命令执行器抽象
-# ============================================================================
-
-def _sanitize_command(command: str) -> str:
-    """移除命令中的敏感信息（密码等），用于日志输出"""
-    return re.sub(r"export SSHPASS='[^']*'", "export SSHPASS='***'", command)
-
-
-def _validate_shell_command(command: str) -> bool:
-    """检查命令是否包含危险的 shell 注入模式
-
-    作为纵深防御手段，在命令执行前检测 $(...) 和反引号等命令替换语法。
-    所有用户可控参数应已在调用前通过 shlex.quote() 转义，此检查仅作
-    最后一道防线。
-    """
-    dangerous = [
-        (r'\$\(', '$(...) 命令替换'),
-        (r'`[^`]+`', '反引号命令替换'),
-    ]
-    for pattern, desc in dangerous:
-        if re.search(pattern, command):
-            logger.warning(f"[Security] 命令包含潜在危险的 shell 模式 ({desc})，已拒绝执行")
-            logger.debug(f"[Security] 被拒绝的命令: {_sanitize_command(command)}")
-            return False
-    return True
-
-
-class CommandExecutor(ABC):
-    """命令执行器抽象基类，统一本地和远程命令执行接口"""
-
-    @abstractmethod
-    async def run(self, command: str, cwd: Optional[str] = None, timeout: int = 300) -> tuple[int, str, str]:
-        """执行命令，返回 (returncode, stdout, stderr)"""
-        pass
-
-    @abstractmethod
-    async def close(self):
-        """关闭连接/清理资源"""
-        pass
-
-
-class LocalExecutor(CommandExecutor):
-    """本地命令执行器，使用 asyncio 子进程"""
-
-    async def run(self, command: str, cwd: Optional[str] = None, timeout: int = 300) -> tuple[int, str, str]:
-        """执行命令，返回 (returncode, stdout, stderr)
-
-        安全说明：使用 create_subprocess_shell 是为了支持包含 shell 特性
-        （管道、重定向、&& 链式命令）的构建命令。所有用户可控的参数（路径、
-        主机名等）在调用前已通过 shlex.quote() 进行转义。执行前会进行
-        命令注入模式检测作为最后一道防线。
-        """
-        logger.debug(f"[LocalExecutor] 执行命令: {_sanitize_command(command)}")
-
-        # 安全最佳实践：执行前检查命令是否包含危险的 shell 注入模式
-        if not _validate_shell_command(command):
-            return -1, "", "命令包含潜在危险的 shell 模式，已被拒绝执行"
-        
-        try:
-            # 验证工作目录
-            if cwd and not os.path.isdir(cwd):
-                return -1, "", f"工作目录不存在: {cwd}"
-
-            proc = await asyncio.create_subprocess_shell(
-                command,
-                cwd=cwd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                env=os.environ.copy(),
-            )
-            
-            try:
-                stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-                returncode = proc.returncode or 0
-                
-                if returncode != 0:
-                    logger.debug(f"[LocalExecutor] 命令执行失败: {_sanitize_command(command)}, 返回码: {returncode}, 错误: {stderr.decode('utf-8', errors='replace')}")
-                
-                return (
-                    returncode,
-                    stdout.decode("utf-8", errors="replace"),
-                    stderr.decode("utf-8", errors="replace"),
-                )
-            except asyncio.TimeoutError:
-                proc.kill()
-                await proc.wait()
-                logger.error(f"[LocalExecutor] 命令执行超时: {_sanitize_command(command)}")
-                return -1, "", f"命令执行超时（{timeout}秒）"
-        except PermissionError:
-            logger.error(f"[LocalExecutor] 权限不足: {_sanitize_command(command)}")
-            return -1, "", "权限不足，请检查文件或目录权限"
-        except FileNotFoundError:
-            logger.error(f"[LocalExecutor] 命令未找到: {_sanitize_command(command)}")
-            return -1, "", "命令未找到，请检查是否安装了相关工具"
-        except Exception as e:
-            logger.error(f"[LocalExecutor] 执行命令异常: {_sanitize_command(command)}, 错误: {e}")
-            return -1, "", "命令执行异常，请检查日志获取详细信息"
-
-    async def close(self):
-        """关闭执行器（本地执行器无需特殊清理）"""
-        pass
-
-
-class ConnectionStatus(Enum):
-    """SSH 连接状态枚举"""
-    DISCONNECTED = "disconnected"
-    CONNECTING = "connecting"
-    CONNECTED = "connected"
-    ERROR = "error"
-
-class RemoteExecutor(CommandExecutor):
-    """远程 SSH 命令执行器，使用 asyncssh 异步连接，按需建立，带保活和重连"""
-
-    def __init__(self, config: AstrBotConfig):
-        self.config = config
-        self._conn = None
-        self._sftp = None
-        self._lock = asyncio.Lock()
-        self._connect_attempts = 0
-        self._max_connect_attempts = 3
-        self._status = ConnectionStatus.DISCONNECTED
-        self._last_error = None
-
-    @property
-    def status(self) -> ConnectionStatus:
-        """获取当前连接状态"""
-        return self._status
-
-    async def _ensure_connected(self, retry: int = 0):
-        """确保 SSH 连接已建立（带锁防止并发连接竞争，支持重试）"""
-        async with self._lock:
-            # 如果正在连接，等待完成
-            if self._status == ConnectionStatus.CONNECTING:
-                await asyncio.sleep(0.5)
-                return await self._ensure_connected(retry)
-
-            # 如果已有连接，检查是否存活
-            if self._conn is not None and self._status == ConnectionStatus.CONNECTED:
-                try:
-                    # 发送 keepalive 探测
-                    await self._conn.run("echo ok", timeout=5)
-                    return
-                except Exception as e:
-                    logger.warning(f"[SSH] 连接已断开，尝试重连: {e}")
-                    self._conn = None
-                    self._sftp = None
-                    self._status = ConnectionStatus.DISCONNECTED
-
-            try:
-                import asyncssh
-            except ImportError:
-                self._status = ConnectionStatus.ERROR
-                raise RuntimeError("远程模式需要 asyncssh 库，请安装: pip install asyncssh")
-
-            hostname = self.config.get("server_ip", "")
-            port = self.config.get("server_port", DEFAULT_SSH_PORT)
-            username = self.config.get("username", "")
-            auth_type = self.config.get("auth_type", "key")
-
-            if not hostname:
-                self._status = ConnectionStatus.ERROR
-                raise ConfigurationError("缺少 server_ip 配置")
-            if not username:
-                self._status = ConnectionStatus.ERROR
-                raise ConfigurationError("缺少 username 配置")
-
-            connect_options: dict = {
-                "host": hostname,
-                "port": port,
-                "username": username,
-                "keepalive_interval": SSH_KEEPALIVE_INTERVAL,
-                "keepalive_count_max": SSH_KEEPALIVE_COUNT_MAX,
-                "connect_timeout": 15,
-            }
-            # 安全最佳实践：使用 known_hosts 进行主机密钥验证，防止中间人攻击
-            # 如果配置了已知主机文件路径则使用，否则使用 asyncssh 默认的 ~/.ssh/known_hosts
-            known_hosts_path = self.config.get("ssh_known_hosts_path", "").strip()
-            if known_hosts_path:
-                expanded = os.path.expanduser(known_hosts_path)
-                connect_options["known_hosts"] = expanded
-                logger.debug(f"[SSH] 使用 known_hosts: {expanded}")
-
-            if auth_type == "password":
-                password = self.config.get("password", "")
-                if not password:
-                    self._status = ConnectionStatus.ERROR
-                    raise ConfigurationError("密码认证方式但未配置 password")
-                connect_options["password"] = password
-                logger.info("[SSH] 使用密码认证连接远程服务器")
-            else:
-                key_path = self.config.get("private_key_path", "")
-                if key_path and os.path.exists(key_path):
-                    connect_options["client_keys"] = [key_path]
-                    logger.info("[SSH] 使用密钥认证连接远程服务器")
-                else:
-                    logger.warning(f"[SSH] 私钥文件不存在: {key_path}，尝试使用 SSH Agent")
-
-            self._status = ConnectionStatus.CONNECTING
-            try:
-                self._conn = await asyncssh.connect(**connect_options)
-                self._connect_attempts = 0
-                self._status = ConnectionStatus.CONNECTED
-                self._last_error = None
-                logger.info("[SSH] 连接成功")
-            except asyncssh.Error as e:
-                self._connect_attempts += 1
-                self._last_error = str(e)
-                logger.error(f"[SSH] 连接失败 (第 {self._connect_attempts} 次): {e}")
-                
-                if self._connect_attempts < self._max_connect_attempts:
-                    wait_time = 2 ** self._connect_attempts  # 指数退避
-                    logger.info(f"[SSH] {wait_time} 秒后重试...")
-                    await asyncio.sleep(wait_time)
-                    await self._ensure_connected(retry + 1)
-                else:
-                    self._status = ConnectionStatus.ERROR
-                    raise SSHConnectionError(f"SSH 连接失败，已重试 {self._max_connect_attempts} 次: {e}")
-
-    async def run(self, command: str, cwd: Optional[str] = None, timeout: int = 300) -> tuple[int, str, str]:
-        """执行远程命令，返回 (returncode, stdout, stderr)"""
-        logger.debug(f"[RemoteExecutor] 执行命令: {_sanitize_command(command)}")
-        
-        try:
-            await self._ensure_connected()
-
-            if cwd:
-                command = f"cd {cwd} && {command}"
-
-            try:
-                result = await self._conn.run(command, timeout=timeout)
-                returncode = result.exit_status or 0
-                
-                if returncode != 0:
-                    logger.debug(f"[RemoteExecutor] 命令执行失败: {_sanitize_command(command)}, 返回码: {returncode}")
-                
-                return returncode, result.stdout or "", result.stderr or ""
-            except asyncssh.TimeoutError:
-                logger.error(f"[RemoteExecutor] 命令执行超时: {_sanitize_command(command)}")
-                # 超时不重置连接，可能是命令本身耗时太长
-                return -1, "", f"命令执行超时（{timeout}秒）"
-            except asyncssh.Error as e:
-                logger.error(f"[RemoteExecutor] SSH 错误: {_sanitize_command(command)}, 错误: {e}")
-                # 重置连接状态，下次自动重连
-                self._conn = None
-                self._sftp = None
-                self._status = ConnectionStatus.DISCONNECTED
-                self._last_error = str(e)
-                return -1, "", "SSH 命令执行失败，请检查日志获取详细信息"
-        except SSHConnectionError as e:
-            return -1, "", "SSH 连接失败，请检查日志获取详细信息"
-        except ConfigurationError as e:
-            return -1, "", "SSH 配置错误，请检查日志获取详细信息"
-
-    async def get_sftp(self):
-        """获取 SFTP 客户端（复用已有连接）"""
-        await self._ensure_connected()
-        if self._sftp is None:
-            try:
-                self._sftp = await self._conn.start_sftp_client()
-            except Exception as e:
-                logger.error(f"[SSH] 创建 SFTP 客户端失败: {e}")
-                raise
-        return self._sftp
-
-    async def close(self):
-        """关闭 SSH 连接并清理资源"""
-        async with self._lock:
-            if self._sftp:
-                try:
-                    self._sftp.exit()
-                except Exception as e:
-                    logger.warning(f"[SSH] 关闭 SFTP 客户端失败: {e}")
-                self._sftp = None
-            
-            if self._conn:
-                try:
-                    self._conn.close()
-                except Exception as e:
-                    logger.warning(f"[SSH] 关闭连接失败: {e}")
-                self._conn = None
-            
-            self._status = ConnectionStatus.DISCONNECTED
-            self._last_error = None
-            logger.info("[SSH] 连接已关闭")
-
-    def reset_connection(self):
-        """主动重置连接状态（用于手动重连）"""
-        self._conn = None
-        self._sftp = None
-        self._status = ConnectionStatus.DISCONNECTED
-        self._connect_attempts = 0
-        self._last_error = None
-        logger.info("[SSH] 连接状态已重置")
-
-
-# ============================================================================
-# 文件系统操作抽象
-# ============================================================================
-
-class FileSystem(ABC):
-    """文件系统操作抽象基类"""
-
-    @abstractmethod
-    async def list_files(self, pattern: str) -> list[str]:
-        pass
-
-    @abstractmethod
-    async def read_file(self, path: str) -> Optional[str]:
-        pass
-
-    @abstractmethod
-    async def write_file(self, path: str, content: str) -> bool:
-        pass
-
-    @abstractmethod
-    async def delete_file(self, path: str) -> bool:
-        pass
-
-    @abstractmethod
-    async def exists(self, path: str) -> bool:
-        pass
-
-
-class LocalFileSystem(FileSystem):
-    """本地文件系统操作"""
-
-    async def list_files(self, pattern: str) -> list[str]:
-        """列出匹配模式的文件"""
-        try:
-            files = glob.glob(pattern)
-            logger.debug(f"[LocalFileSystem] 列出文件: {pattern}, 找到 {len(files)} 个")
-            return files
-        except Exception as e:
-            logger.error(f"[LocalFileSystem] 列出文件失败 {pattern}: {e}")
-            return []
-
-    async def read_file(self, path: str) -> Optional[str]:
-        """读取文件内容"""
-        logger.debug(f"[LocalFileSystem] 读取文件: {path}")
-        
-        try:
-            if not os.path.exists(path):
-                logger.warning(f"[LocalFileSystem] 文件不存在: {path}")
-                return None
-            
-            with open(path, "r", encoding="utf-8") as f:
-                return f.read()
-        except PermissionError:
-            logger.error(f"[LocalFileSystem] 读取文件权限不足: {path}")
-            return None
-        except UnicodeDecodeError:
-            logger.error(f"[LocalFileSystem] 文件编码错误: {path}")
-            return None
-        except Exception as e:
-            logger.error(f"[LocalFileSystem] 读取文件失败 {path}: {e}")
-            return None
-
-    async def write_file(self, path: str, content: str) -> bool:
-        """写入文件内容"""
-        logger.debug(f"[LocalFileSystem] 写入文件: {path}")
-        
-        try:
-            # 确保目录存在
-            dir_path = os.path.dirname(path)
-            if dir_path and not os.path.exists(dir_path):
-                os.makedirs(dir_path, exist_ok=True)
-            
-            with open(path, "w", encoding="utf-8") as f:
-                f.write(content)
-            # 安全最佳实践：显式设置文件权限，避免依赖 umask
-            os.chmod(path, 0o644)
-            return True
-        except PermissionError:
-            logger.error(f"[LocalFileSystem] 写入文件权限不足: {path}")
-            return False
-        except Exception as e:
-            logger.error(f"[LocalFileSystem] 写入文件失败 {path}: {e}")
-            return False
-
-    async def delete_file(self, path: str) -> bool:
-        """删除文件或目录"""
-        logger.debug(f"[LocalFileSystem] 删除文件: {path}")
-        
-        try:
-            if not os.path.exists(path):
-                logger.warning(f"[LocalFileSystem] 文件不存在: {path}")
-                return True
-            
-            if os.path.isdir(path):
-                shutil.rmtree(path)
-            else:
-                os.remove(path)
-            return True
-        except PermissionError:
-            logger.error(f"[LocalFileSystem] 删除文件权限不足: {path}")
-            return False
-        except Exception as e:
-            logger.error(f"[LocalFileSystem] 删除文件失败 {path}: {e}")
-            return False
-
-    async def exists(self, path: str) -> bool:
-        """检查文件或目录是否存在"""
-        return os.path.exists(path)
-
-
-class RemoteFileSystem(FileSystem):
-    """远程 SFTP 文件系统操作（复用 RemoteExecutor 的 SSH 连接）"""
-
-    def __init__(self, executor: RemoteExecutor):
-        self.executor = executor
-
-    async def list_files(self, pattern: str) -> list[str]:
-        """列出匹配模式的远程文件"""
-        logger.debug(f"[RemoteFileSystem] 列出文件: {pattern}")
-        
-        try:
-            sftp = await self.executor.get_sftp()
-            files = await sftp.glob(pattern)
-            logger.debug(f"[RemoteFileSystem] 找到 {len(files)} 个文件")
-            return files
-        except Exception as e:
-            logger.error(f"[RemoteFileSystem] 列出远程文件失败: {e}")
-            return []
-
-    async def read_file(self, path: str) -> Optional[str]:
-        """读取远程文件内容"""
-        logger.debug(f"[RemoteFileSystem] 读取文件: {path}")
-        
-        try:
-            sftp = await self.executor.get_sftp()
-            async with sftp.open(path, "r") as f:
-                content = await f.read()
-                if isinstance(content, bytes):
-                    content = content.decode("utf-8", errors="replace")
-                return content
-        except FileNotFoundError:
-            logger.warning(f"[RemoteFileSystem] 远程文件不存在: {path}")
-            return None
-        except PermissionError:
-            logger.error(f"[RemoteFileSystem] 读取远程文件权限不足: {path}")
-            return None
-        except Exception as e:
-            logger.error(f"[RemoteFileSystem] 读取远程文件失败 {path}: {e}")
-            return None
-
-    async def write_file(self, path: str, content: str) -> bool:
-        """写入远程文件内容"""
-        logger.debug(f"[RemoteFileSystem] 写入文件: {path}")
-        
-        try:
-            sftp = await self.executor.get_sftp()
-            dir_path = posixpath.dirname(path)
-            
-            # 递归创建目录
-            if dir_path and dir_path != "/":
-                await self._mkdir_recursive(sftp, dir_path)
-            
-            async with sftp.open(path, "wb") as f:
-                if isinstance(content, str):
-                    content = content.encode("utf-8")
-                await f.write(content)
-            return True
-        except PermissionError:
-            logger.error(f"[RemoteFileSystem] 写入远程文件权限不足: {path}")
-            return False
-        except Exception as e:
-            logger.error(f"[RemoteFileSystem] 写入远程文件失败 {path}: {e}")
-            return False
-
-    async def delete_file(self, path: str) -> bool:
-        """删除远程文件或目录"""
-        logger.debug(f"[RemoteFileSystem] 删除文件: {path}")
-        
-        try:
-            sftp = await self.executor.get_sftp()
-            
-            # 先检查是否存在
-            try:
-                await sftp.stat(path)
-            except FileNotFoundError:
-                logger.warning(f"[RemoteFileSystem] 远程文件不存在: {path}")
-                return True
-            
-            try:
-                await sftp.remove(path)
-            except Exception:
-                await self._rmdir_recursive(sftp, path)
-            return True
-        except PermissionError:
-            logger.error(f"[RemoteFileSystem] 删除远程文件权限不足: {path}")
-            return False
-        except Exception as e:
-            logger.error(f"[RemoteFileSystem] 删除远程文件失败 {path}: {e}")
-            return False
-
-    async def _mkdir_recursive(self, sftp, path: str):
-        """递归创建远程目录"""
-        parts = path.split("/")
-        current = ""
-        for part in parts:
-            if part:
-                current += "/" + part
-                try:
-                    await sftp.stat(current)
-                except FileNotFoundError:
-                    await sftp.mkdir(current)
-
-    async def _rmdir_recursive(self, sftp, path: str):
-        """递归删除远程目录"""
-        try:
-            async for entry in sftp.listdir(path):
-                entry_path = posixpath.join(path, entry)
-                try:
-                    await sftp.remove(entry_path)
-                except Exception:
-                    await self._rmdir_recursive(sftp, entry_path)
-            await sftp.rmdir(path)
-        except Exception as e:
-            logger.error(f"[RemoteFileSystem] 递归删除目录失败 {path}: {e}")
-
-    async def exists(self, path: str) -> bool:
-        """检查远程文件或目录是否存在"""
-        try:
-            sftp = await self.executor.get_sftp()
-            await sftp.stat(path)
-            return True
-        except FileNotFoundError:
-            return False
-        except Exception as e:
-            logger.error(f"[RemoteFileSystem] 检查文件存在失败 {path}: {e}")
-            return False
-
-
-# ============================================================================
-# 博客文章管理器
-# ============================================================================
-
-class BlogManager:
-    """博客文章管理器，封装文章的 CRUD 操作"""
-
-    def __init__(self, fs: FileSystem, posts_dir: str):
-        self.fs = fs
-        self.posts_dir = posts_dir
-
-    def _make_path(self, filename: str) -> str:
-        """构建文章完整路径"""
-        return os.path.join(self.posts_dir, filename)
-
-    async def list_posts(self) -> list[PostInfo]:
-        """列出所有文章，返回文章信息列表"""
-        pattern = os.path.join(self.posts_dir, "*.md")
-        files = await self.fs.list_files(pattern)
-        posts = []
-        for filepath in files:
-            try:
-                content = await self.fs.read_file(filepath)
-                if content is None:
-                    continue
-                metadata, _ = PostMetadata.from_content(content)
-                posts.append(PostInfo(
-                    filename=os.path.basename(filepath),
-                    title=metadata.title or os.path.basename(filepath).replace(".md", ""),
-                    published=metadata.published,
-                    category=metadata.category,
-                    tags=metadata.tags,
-                    draft=metadata.draft,
-                ))
-            except Exception as e:
-                logger.warning(f"读取文章失败 {filepath}: {e}")
-        return posts
-
-    async def read_post(self, filename: str) -> Optional[str]:
-        """读取文章完整内容"""
-        return await self.fs.read_file(self._make_path(filename))
-
-    async def write_post(self, filename: str, content: str) -> bool:
-        """写入文章"""
-        return await self.fs.write_file(self._make_path(filename), content)
-
-    async def delete_post(self, filename: str) -> bool:
-        """删除文章"""
-        return await self.fs.delete_file(self._make_path(filename))
-
-    async def exists(self, filename: str) -> bool:
-        """检查文章是否存在"""
-        return await self.fs.exists(self._make_path(filename))
-
-
-# ============================================================================
-# 构建部署管理器
-# ============================================================================
-
-class BuildDeployManager:
-    """构建和部署管理器，负责博客的构建和部署流程"""
-
-    def __init__(self, config: AstrBotConfig, local_executor: CommandExecutor, remote_executor: Optional[RemoteExecutor] = None):
-        self.config = config
-        self.local_executor = local_executor
-        self.remote_executor = remote_executor
-        
-        # 校验部署模式配置
-        deploy_mode_value = config.get("deploy_mode", "local_build")
-        if deploy_mode_value not in [m.value for m in DeployMode]:
-            logger.warning(f"[BuildDeployManager] 无效的部署模式: {deploy_mode_value}，使用默认值 local_build")
-            deploy_mode_value = "local_build"
-        self.deploy_mode = DeployMode(deploy_mode_value)
-        
-        # 校验路径配置
-        self.blog_root = self._validate_path(config.get("local_blog_root", "/var/www/firefly"), "local_blog_root")
-        self.remote_blog_root = self._validate_path(config.get("remote_blog_root", "/var/www/firefly"), "remote_blog_root")
-        self.web_root = self._validate_path(config.get("web_root", "/var/www/html"), "web_root")
-        self.remote_web_root = self._validate_path(config.get("remote_web_root", "/var/www/html"), "remote_web_root")
-        
-        logger.info(f"[BuildDeployManager] 初始化完成 - 部署模式: {self.deploy_mode.value}")
-
-    def _validate_path(self, path: str, config_name: str) -> str:
-        """校验路径配置的有效性，防止路径遍历"""
-        if not isinstance(path, str) or not path.strip():
-            logger.warning(f"[BuildDeployManager] {config_name} 配置无效，使用默认路径")
-            return "/var/www/firefly" if "blog" in config_name else "/var/www/html"
-        # 安全最佳实践：规范化路径，防止路径遍历攻击
-        return os.path.realpath(path.strip())
-
-    async def _is_firefly_blog(self, path: str) -> bool:
-        """检查路径是否为 Firefly 博客项目"""
-        if self.deploy_mode == DeployMode.REMOTE_BUILD and self.remote_executor:
-            package_json = posixpath.join(path, "package.json")
-            src_content = posixpath.join(path, "src", "content", "posts")
-            astro_config = posixpath.join(path, "astro.config.mjs")
-            
-            matches = 0
-            rc, _, _ = await self.remote_executor.run(f"test -f {package_json}", timeout=5)
-            if rc == 0:
-                matches += 1
-            rc, _, _ = await self.remote_executor.run(f"test -d {src_content}", timeout=5)
-            if rc == 0:
-                matches += 1
-            rc, _, _ = await self.remote_executor.run(f"test -f {astro_config}", timeout=5)
-            if rc == 0:
-                matches += 1
-            return matches >= 2
-        else:
-            if not os.path.isdir(path):
-                return False
-            package_json = os.path.join(path, "package.json")
-            src_content = os.path.join(path, "src", "content", "posts")
-            astro_config = os.path.join(path, "astro.config.mjs")
-            matches = 0
-            if os.path.isfile(package_json):
-                matches += 1
-            if os.path.isdir(src_content):
-                matches += 1
-            if os.path.isfile(astro_config):
-                matches += 1
-            return matches >= 2
-
-    def _get_executor(self) -> CommandExecutor:
-        """根据部署模式获取对应的命令执行器"""
-        if self.deploy_mode == DeployMode.REMOTE_BUILD and self.remote_executor:
-            return self.remote_executor
-        return self.local_executor
-
-    def _get_blog_root(self) -> str:
-        """根据部署模式获取博客根目录"""
-        if self.deploy_mode == DeployMode.REMOTE_BUILD:
-            return self.remote_blog_root
-        return self.blog_root
-
-    async def check_environment(self) -> tuple[bool, str]:
-        """检查构建环境（Node.js 和 pnpm）"""
-        executor = self._get_executor()
-        rc, out, err = await executor.run("node --version")
-        if rc != 0:
-            return False, f"未安装 Node.js: {err}"
-        rc, out, err = await executor.run("pnpm --version")
-        if rc != 0:
-            return False, f"未安装 pnpm: {err}"
-        return True, f"环境正常，Node.js: {out.strip()}"
-
-    async def install_dependencies(self) -> tuple[bool, str]:
-        """安装 pnpm 依赖（如果博客目录不存在则自动克隆）"""
-        executor = self._get_executor()
-        blog_root = self._get_blog_root()
-        
-        logger.info(f"[Build] 开始安装依赖，目录: {blog_root}")
-        
-        # 先检查博客目录是否存在，不存在则自动克隆
-        blog_exists = True
-        if self.deploy_mode == DeployMode.REMOTE_BUILD:
-            rc, out, err = await executor.run(f"ls -la {blog_root}", timeout=10)
-            if rc != 0:
-                blog_exists = False
-        else:
-            if not os.path.exists(blog_root):
-                blog_exists = False
-        
-        if not blog_exists:
-            msg = await self._clone_blog_repo()
-            if not msg.startswith("[OK]"):
-                return False, msg
-        
-        # 检查 package.json 是否存在，不存在则尝试克隆
-        package_json_path = os.path.join(blog_root, "package.json")
-        package_exists = True
-        if self.deploy_mode == DeployMode.REMOTE_BUILD:
-            rc, out, err = await executor.run(f"ls -la {package_json_path}", timeout=10)
-            if rc != 0:
-                package_exists = False
-        else:
-            if not os.path.exists(package_json_path):
-                package_exists = False
-        
-        if not package_exists:
-            msg = await self._clone_blog_repo()
-            if not msg.startswith("[OK]"):
-                return False, msg
-        
-        rc, out, err = await executor.run("pnpm install", cwd=blog_root, timeout=300)
-        
-        if rc != 0:
-            error_details = []
-            
-            # 添加基本调试信息
-            error_details.append(f"命令执行失败，返回码: {rc}")
-            error_details.append(f"工作目录: {blog_root}")
-            
-            if err:
-                # 提取关键错误信息
-                error_lines = err.strip().split('\n')
-                # 只显示最后几行关键错误
-                if len(error_lines) > 10:
-                    error_lines = error_lines[-10:]
-                error_details.append("\n详细错误信息:")
-                error_details.extend(error_lines)
-            elif out:
-                # 如果没有错误输出但有标准输出，也显示
-                error_details.append("\n命令输出:")
-                out_lines = out.strip().split('\n')
-                if len(out_lines) > 10:
-                    out_lines = out_lines[-10:]
-                error_details.extend(out_lines)
-            else:
-                # 完全没有输出的情况
-                error_details.append("\n命令无输出，可能的原因:")
-                error_details.append("- pnpm 命令不存在或路径问题")
-                error_details.append("- 权限不足")
-                error_details.append("- 进程被意外终止")
-            
-            # 检查是否有警告信息
-            if out:
-                out_lines = out.strip().split('\n')
-                warning_lines = [line for line in out_lines if 'WARN' in line or 'warning' in line.lower()]
-                if warning_lines:
-                    error_details.append("\n警告信息:")
-                    error_details.extend(warning_lines[:5])
-            
-            error_summary = "\n".join(error_details)
-            
-            # 添加可能的解决方案
-            solutions = [
-                "\n\n可能的解决方案:",
-                "1. 检查网络连接是否正常",
-                "2. 尝试设置 npm/pnpm 镜像源:",
-                "   pnpm config set registry https://registry.npmmirror.com",
-                "3. 检查磁盘空间是否充足",
-                "4. 尝试删除 node_modules 和 pnpm-lock.yaml 后重新安装",
-                "5. 检查 Node.js 版本 >= 22",
-                "6. 检查是否有权限访问博客目录",
-                "7. 尝试手动运行 pnpm install 查看详细错误",
-            ]
-            
-            return False, f"{error_summary}{''.join(solutions)}"
-        
-        # 检查输出中是否有警告
-        if out and ('WARN' in out or 'warning' in out.lower()):
-            return True, f"依赖安装成功（有警告）\n{out[-500:]}"
-        
-        return True, "依赖安装成功"
-
-    async def _clone_blog_repo(self) -> str:
-        """克隆 Firefly 博客仓库"""
-        executor = self._get_executor()
-        blog_root = self._get_blog_root()
-        
-        logger.info(f"[Build] 克隆 Firefly 博客仓库到: {blog_root}")
-        
-        # GitHub 仓库地址和镜像
-        repo_url = "https://github.com/qiyueling2716/Firefly-Blog.git"
-        mirror_url = "https://hubproxy.jiaozi.live/https://github.com/qiyueling2716/Firefly-Blog.git"
-        
-        # 先检查 git 是否安装
-        rc, out, err = await executor.run("git --version", timeout=10)
-        if rc != 0:
-            return "[ERROR] 未安装 git，请先安装 git\n\n解决方案:\n- Ubuntu/Debian: sudo apt install git\n- CentOS/RHEL: sudo yum install git\n- macOS: brew install git\n- Windows: 下载安装 git"
-        
-        # 创建父目录
-        if self.deploy_mode == DeployMode.REMOTE_BUILD:
-            parent_dir = posixpath.dirname(blog_root)
-            await executor.run(f"mkdir -p {parent_dir}", timeout=10)
-        else:
-            parent_dir = os.path.dirname(blog_root)
-            if parent_dir:
-                os.makedirs(parent_dir, exist_ok=True)
-        
-        # 检查目标目录是否已存在且非空
-        dir_exists = False
-        if self.deploy_mode == DeployMode.REMOTE_BUILD:
-            rc, out, err = await executor.run(f"ls -la {blog_root}", timeout=10)
-            dir_exists = rc == 0
-        else:
-            dir_exists = os.path.isdir(blog_root)
-        
-        if dir_exists:
-            # 检查目录是否为空
-            is_empty = False
-            if self.deploy_mode == DeployMode.REMOTE_BUILD:
-                rc, out, err = await executor.run(f"ls -A {blog_root} | wc -l", timeout=10)
-                is_empty = rc == 0 and (out.strip() == "0" or not out.strip())
-            else:
-                is_empty = len(os.listdir(blog_root)) == 0
-            
-            if not is_empty:
-                # 目录已存在且非空，检查是否已经是 Firefly 博客
-                if await self._is_firefly_blog(blog_root):
-                    logger.info(f"[Build] 目标目录已存在且是 Firefly 博客，跳过克隆")
-                    return f"[OK] 目标目录已存在且是 Firefly 博客: {blog_root}"
-                else:
-                    # 目录存在但不是 Firefly 博客，询问是否覆盖
-                    return f"[ERROR] 目标目录已存在但不是 Firefly 博客\n目录: {blog_root}\n请手动清理该目录后重试，或在配置中指定其他路径"
-        
-        # 尝试克隆仓库
-        rc, out, err = await executor.run(f"git clone {repo_url} {blog_root}", timeout=120)
-        if rc != 0:
-            logger.warning(f"[Build] 主仓库克隆失败，尝试镜像: {err}")
-            rc, out, err = await executor.run(f"git clone {mirror_url} {blog_root}", timeout=120)
-            if rc != 0:
-                return f"[ERROR] 克隆博客仓库失败\n错误信息: {err}\n\n可能的解决方案:\n1. 检查网络连接\n2. 尝试手动克隆: git clone {repo_url} {blog_root}\n3. 检查目标目录是否有写入权限"
-        
-        return f"[OK] 成功克隆 Firefly 博客仓库到 {blog_root}"
-
-    async def build(self) -> tuple[bool, str]:
-        """执行 pnpm build 构建博客"""
-        executor = self._get_executor()
-        blog_root = self._get_blog_root()
-        rc, out, err = await executor.run("pnpm build", cwd=blog_root, timeout=600)
-        if rc != 0:
-            return False, f"构建失败:\n{err}"
-        return True, "构建成功"
-
-    async def deploy(self) -> tuple[bool, str]:
-        """部署构建产物到 Web 服务器"""
-        if self.deploy_mode == DeployMode.LOCAL_ONLY:
-            return await self._deploy_local()
-        elif self.deploy_mode == DeployMode.LOCAL_BUILD:
-            return await self._deploy_local_to_remote()
-        elif self.deploy_mode == DeployMode.REMOTE_BUILD:
-            return await self._deploy_remote()
-        return False, "未知的部署模式"
-
-    async def _deploy_local(self):
-        """纯本地部署：复制 dist/ 到本地 web 目录"""
-        local_dist = os.path.join(self.blog_root, "dist")
-        if not os.path.exists(local_dist):
-            return False, "构建产物不存在，请先构建"
-        try:
-            if os.path.exists(self.web_root):
-                shutil.rmtree(self.web_root)
-            shutil.copytree(local_dist, self.web_root)
-            return True, f"已部署到 {self.web_root}"
-        except Exception as e:
-            logger.error(f"[BuildDeployManager] 本地部署失败: {e}")
-            return False, "部署失败，请检查日志获取详细信息"
-
-    async def _run_sshpass(self, inner_cmd: str, timeout: int = 300) -> tuple[int, str, str]:
-        """安全执行 sshpass 命令，密码通过临时文件传递而非环境变量
-
-        避免密码出现在进程列表（/proc/*/environ）中，同时防止密码中的
-        特殊字符（如单引号）破坏 shell 命令结构。
-        """
-        import tempfile
-        password = self.config.get("password", "")
-        fd, temp_path = tempfile.mkstemp()
-        try:
-            os.write(fd, password.encode())
-            os.close(fd)
-            os.chmod(temp_path, 0o600)
-            cmd = f"sshpass -f {shlex.quote(temp_path)} {inner_cmd}"
-            return await self.local_executor.run(cmd, timeout=timeout)
-        finally:
-            try:
-                os.unlink(temp_path)
-            except OSError:
-                pass
-
-    async def _deploy_local_to_remote(self):
-        """本地构建后通过 rsync/scp 部署到远端"""
-        if not self.remote_executor:
-            return False, "本地构建模式需要配置远程 SSH"
-
-        local_dist = os.path.join(self.blog_root, "dist")
-        if not os.path.exists(local_dist):
-            return False, f"本地构建产物不存在，请先构建\n预期路径: {local_dist}"
-
-        hostname = self.config.get("server_ip", "")
-        username = self.config.get("username", "")
-        port = self.config.get("server_port", 22)
-        auth_type = self.config.get("auth_type", "key")
-
-        # 优先使用 rsync 部署
-        # 安全最佳实践：使用 StrictHostKeyChecking=yes 防止中间人攻击
-        # 关闭时使用 accept-new（首次自动接受，后续变更拒绝），比完全禁用安全
-        strict_checking = self.config.get("ssh_strict_host_key_checking", True)
-        checking_opt = "yes" if strict_checking else "accept-new"
-        ssh_opts = f"-p {port} -o StrictHostKeyChecking={checking_opt}"
-        if auth_type == "key":
-            key_path = self.config.get("private_key_path", "")
-            if key_path and os.path.exists(key_path):
-                ssh_opts += f" -i {key_path}"
-            rsync_cmd = (
-                f'rsync -avz --delete '
-                f'-e "ssh {ssh_opts}" '
-                f'{shlex.quote(f"{local_dist}/")} {shlex.quote(f"{username}@{hostname}:{self.remote_web_root}/")}'
-            )
-        else:
-            # 密码认证：使用 sshpass -f 从临时文件读取密码，避免密码出现在进程列表中
-            password = self.config.get("password", "")
-            if not password:
-                return False, "密码认证模式下未配置密码"
-            rsync_cmd = (
-                f'rsync -avz --delete '
-                f'-e "ssh {ssh_opts}" '
-                f'{shlex.quote(f"{local_dist}/")} {shlex.quote(f"{username}@{hostname}:{self.remote_web_root}/")}'
-            )
-
-        if auth_type == "password":
-            rc, out, err = await self._run_sshpass(rsync_cmd, timeout=300)
-        else:
-            rc, out, err = await self.local_executor.run(rsync_cmd, timeout=300)
-        if rc != 0:
-            # rsync 失败，检查是否是本地路径问题
-            logger.warning(f"rsync 失败: {err}")
-            
-            # 检查本地 dist 目录内容
-            if os.path.exists(local_dist):
-                dist_contents = os.listdir(local_dist)
-                if not dist_contents:
-                    return False, f"本地构建产物目录为空: {local_dist}\n请重新执行构建"
-            
-            # 回退到 scp
-            logger.info("尝试使用 scp 部署")
-            return await self._deploy_via_scp(local_dist, hostname, username, port, auth_type)
-
-        return True, f"已部署到 {hostname}:{self.remote_web_root}"
-
-    async def _deploy_via_scp(self, local_dist: str, hostname: str, username: str, port: int, auth_type: str) -> tuple[bool, str]:
-        """通过 scp 部署（rsync 失败时的回退方案）"""
-        # 安全最佳实践：使用 StrictHostKeyChecking=yes 防止中间人攻击
-        strict_checking = self.config.get("ssh_strict_host_key_checking", True)
-        checking_opt = "yes" if strict_checking else "accept-new"
-        ssh_opts = f"-P {port} -o StrictHostKeyChecking={checking_opt}"
-
-        if auth_type == "key":
-            key_path = self.config.get("private_key_path", "")
-            if key_path and os.path.exists(key_path):
-                ssh_opts += f" -i {key_path}"
-            scp_cmd = (
-                f'scp -r {ssh_opts} '
-                f'{shlex.quote(f"{local_dist}/*")} {shlex.quote(f"{username}@{hostname}:{self.remote_web_root}/")}'
-            )
-        else:
-            password = self.config.get("password", "")
-            if not password:
-                return False, "密码认证模式下未配置密码"
-            await self.remote_executor.run(f"rm -rf {self.remote_web_root}/*")
-            scp_cmd = (
-                f'scp -r {ssh_opts} '
-                f'{shlex.quote(f"{local_dist}/*")} {shlex.quote(f"{username}@{hostname}:{self.remote_web_root}/")}'
-            )
-
-        if auth_type == "password":
-            rc, out, err = await self._run_sshpass(scp_cmd, timeout=300)
-        else:
-            rc, out, err = await self.local_executor.run(scp_cmd, timeout=300)
-        if rc != 0:
-            return False, f"scp 部署失败:\n{err}"
-        return True, f"已通过 scp 部署到 {hostname}:{self.remote_web_root}"
-
-    async def _deploy_remote(self):
-        """远端构建后直接复制 dist/ 到远端 firefly 部署目录"""
-        if not self.remote_executor:
-            return False, "远程构建模式需要配置 SSH"
-
-        # Firefly 博客的部署目标是 remote_blog_root 下的 dist/ 目录
-        # 如果 remote_blog_root 是 /var/www/firefly，则部署到 /var/www/firefly
-        deploy_target = self.remote_blog_root
-
-        rc, out, err = await self.remote_executor.run(
-            f"rm -rf {deploy_target}/* && cp -r {self.remote_blog_root}/dist/* {deploy_target}/",
-            timeout=60,
-        )
-        if rc != 0:
-            return False, f"远端部署失败:\n{err}"
-        return True, f"已部署到远端 {deploy_target}"
-
-    async def check_dependencies_installed(self) -> bool:
-        """检查 node_modules 是否已安装"""
-        blog_root = self._get_blog_root()
-        if self.deploy_mode == DeployMode.REMOTE_BUILD and self.remote_executor:
-            node_modules_path = posixpath.join(blog_root, "node_modules")
-            rc, _, _ = await self.remote_executor.run(f"test -d {node_modules_path}")
-            return rc == 0
-        else:
-            node_modules_path = os.path.join(blog_root, "node_modules")
-            return os.path.exists(node_modules_path)
-
-
-# ============================================================================
-# 文件名处理工具
-# ============================================================================
-
-class FilenameUtil:
-    """文件名处理工具，负责标题到文件名的转换"""
-
-    @staticmethod
-    def sanitize(title: str) -> str:
-        """将标题转换为安全的文件名（保留中英文、数字、连字符）"""
-        safe = re.sub(r'[^\w\s\u4e00-\u9fff-]', '', title)
-        safe = re.sub(r'[-\s]+', '-', safe)
-        return safe.lower().strip('-')
-    
-    @staticmethod
-    def resolve(title_or_filename: str) -> str:
-        """解析用户输入为文件名，如果已经是 .md 后缀则直接使用"""
-        # 安全检查：防止路径遍历
-        if not title_or_filename:
-            return "untitled.md"
-        
-        # 检测危险字符
-        if ".." in title_or_filename:
-            # 移除所有 ..
-            cleaned = title_or_filename.replace("..", "")
-            title_or_filename = cleaned or "untitled.md"
-        
-        # 处理路径分隔符：只取文件名部分
-        # Windows 和 Linux 都要处理
-        title_or_filename = title_or_filename.replace("\\", "/")
-        if "/" in title_or_filename:
-            title_or_filename = title_or_filename.split("/")[-1]
-        
-        # 移除盘符
-        if re.match(r'^[A-Za-z]:', title_or_filename):
-            title_or_filename = title_or_filename.split(":", 1)[-1]
-            if title_or_filename.startswith("/"):
-                title_or_filename = title_or_filename[1:]
-        
-        if title_or_filename.endswith(".md"):
-            return title_or_filename
-        return f"{FilenameUtil.sanitize(title_or_filename)}.md"
-
-
-# ============================================================================
-# 装饰器定义
-# ============================================================================
-
-def require_admin(func):
-    """管理员权限检查装饰器 - 使用 UMO 判定"""
-    @functools.wraps(func)
-    async def wrapper(self, event, *args, **kwargs):
-        ok, msg = self._check_admin_permission(event)
-        if not ok:
-            yield msg
-            return
-        
-        result = func(self, event, *args, **kwargs)
-        # 兼容同步返回值、异步生成器和同步生成器
-        if hasattr(result, '__aiter__'):
-            async for item in result:
-                yield item
-        elif hasattr(result, '__iter__'):
-            for item in result:
-                yield item
-        elif result is not None:
-            yield result
-    return wrapper
-
-def require_blog_manager(func):
-    """博客管理器检查装饰器"""
-    @functools.wraps(func)
-    async def wrapper(self, event, *args, **kwargs):
-        if not self.blog_manager:
-            yield "[ERROR] 博客管理器未初始化"
-            return
-        
-        result = func(self, event, *args, **kwargs)
-        # 兼容同步返回值、异步生成器和同步生成器
-        if hasattr(result, '__aiter__'):
-            async for item in result:
-                yield item
-        elif hasattr(result, '__iter__'):
-            for item in result:
-                yield item
-        elif result is not None:
-            yield result
-    return wrapper
-
-def require_build_manager(func):
-    """构建管理器检查装饰器"""
-    @functools.wraps(func)
-    async def wrapper(self, event, *args, **kwargs):
-        if not self.build_manager:
-            yield "[ERROR] 构建管理器未初始化"
-            return
-        
-        result = func(self, event, *args, **kwargs)
-        # 兼容同步返回值、异步生成器和同步生成器
-        if hasattr(result, '__aiter__'):
-            async for item in result:
-                yield item
-        elif hasattr(result, '__iter__'):
-            for item in result:
-                yield item
-        elif result is not None:
-            yield result
-    return wrapper
 
 # ============================================================================
 # 插件主类
@@ -1659,10 +78,10 @@ def require_build_manager(func):
     "astrbot_plugin_Firefly_Blog_Manager",
     "月凌",
     "通过 AI 指令管理 Firefly 博客文章和部署",
-    "1.3.5",
+    PLUGIN_VERSION,
     "https://github.com/qiyueling2716/astrbot_plugin_Firefly_Blog_Manager",
 )
-class FireflyBlogManager(Star):
+class FireflyBlogManager(WebUIMixin, Star):
     """Firefly 博客管理插件
 
     提供 LLM 工具让 Agent 能够管理 Firefly 博客的文章（创建、删除、列出、查看、更新、搜索）
@@ -1678,17 +97,49 @@ class FireflyBlogManager(Star):
         self.blog_manager: Optional[BlogManager] = None
         self.build_manager: Optional[BuildDeployManager] = None
         self._init_components()
+        # 注册 Dashboard 页面 Web API
+        self.register_web_apis()
         
         # 安全最佳实践：未配置 admin_umo 时发出警告
         if not self.config.get("admin_umo", "").strip():
             logger.warning("[Firefly] 未配置管理员 UMO，所有管理操作无需权限验证。请在生产环境中设置 admin_umo。")
         
         # 投稿持久化配置
-        self._submissions_file = os.path.join(
-            os.path.dirname(os.path.abspath(__file__)), 
-            "_submissions_cache.json"
-        )
+        self._submissions_file = self._get_submissions_file()
         self._submissions_cache = self._load_submissions()
+
+    def _get_submissions_file(self) -> str:
+        """获取投稿缓存文件路径
+
+        使用 AstrBot 框架标准接口 StarTools.get_data_dir() 将数据保存在
+        数据目录（data/plugin_data/），避免将运行时数据写入插件目录。
+        StarTools 不可用时回退到插件目录，并迁移旧文件。
+        """
+        try:
+            from astrbot.core.star.star_tools import StarTools
+
+            data_dir = StarTools.get_data_dir()
+            data_path = os.path.join(str(data_dir), "submissions_cache.json")
+        except Exception as e:
+            logger.warning(f"[Firefly] 无法获取 AstrBot 数据目录，回退到插件目录: {e}")
+            data_path = os.path.join(
+                os.path.dirname(os.path.abspath(__file__)),
+                "_submissions_cache.json",
+            )
+
+        # 迁移旧版缓存文件（位于插件目录）
+        legacy_path = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)),
+            "_submissions_cache.json",
+        )
+        if os.path.exists(legacy_path) and legacy_path != data_path and not os.path.exists(data_path):
+            try:
+                shutil.copy2(legacy_path, data_path)
+                logger.info(f"[Firefly] 已迁移投稿缓存: {legacy_path} -> {data_path}")
+            except Exception as e:
+                logger.warning(f"[Firefly] 迁移投稿缓存失败: {e}")
+
+        return data_path
     
     def _load_submissions(self) -> dict:
         """从文件加载投稿缓存"""
@@ -1807,10 +258,9 @@ class FireflyBlogManager(Star):
                 resp_text = llm_resp.get("completion_text", str(llm_resp))
 
             # 尝试提取 JSON
-            import json as json_module
             json_match = re.search(r'\{[\s\S]*\}', resp_text)
             if json_match:
-                result = json_module.loads(json_match.group())
+                result = json.loads(json_match.group())
                 result["review_time"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 # 确保必要字段
                 result.setdefault("passed", False)
@@ -1933,14 +383,18 @@ class FireflyBlogManager(Star):
         return None
 
     def _check_admin_permission(self, event) -> tuple[bool, str]:
-        """检查用户是否有管理员权限（使用 UMO 判定）
-        
+        """检查用户是否有管理员权限
+
+        权限判定顺序（使用 AstrBot 框架标准接口）：
+        1. 优先使用框架提供的平台管理员角色（event.is_admin()）
+        2. 回退到配置文件中的 admin_umo 匹配
+
         Args:
-            event: 事件对象，包含 UMO 信息
-        
+            event: 事件对象，包含角色/UMO 信息
+
         返回: (是否有权限, 错误消息或空字符串)
-        
-        支持两种配置格式：
+
+        admin_umo 支持两种配置格式：
         1. 完整 UMO 格式：platform:user_id（如 onebot:123456789）
         2. 仅用户 ID：纯数字（如 123456789），会自动匹配任意平台
         """
@@ -1949,6 +403,15 @@ class FireflyBlogManager(Star):
         # 如果未配置管理员 UMO，允许所有操作（方便调试）
         if not admin_umo:
             return True, ""
+        
+        # 优先使用框架标准接口：平台管理员角色
+        is_admin = getattr(event, "is_admin", None)
+        if callable(is_admin):
+            try:
+                if is_admin():
+                    return True, ""
+            except Exception:
+                logger.warning("[Firefly] 调用 event.is_admin() 失败，回退到 UMO 匹配")
         
         # 获取当前用户的 UMO
         current_umo = self._get_umo(event)
@@ -1978,27 +441,6 @@ class FireflyBlogManager(Star):
         
         return False, "[ERROR] 权限不足：此操作仅允许管理员使用"
 
-    def _is_firefly_blog(self, path: str) -> bool:
-        """检查路径是否为 Firefly 博客项目"""
-        if not os.path.isdir(path):
-            return False
-        
-        # 检查 Firefly 博客特征文件
-        package_json = os.path.join(path, "package.json")
-        src_content = os.path.join(path, "src", "content", "posts")
-        astro_config = os.path.join(path, "astro.config.mjs")
-        
-        # 至少满足两个条件
-        matches = 0
-        if os.path.isfile(package_json):
-            matches += 1
-        if os.path.isdir(src_content):
-            matches += 1
-        if os.path.isfile(astro_config):
-            matches += 1
-        
-        return matches >= 2
-
     def _is_blog_built(self, path: str) -> bool:
         """检查博客是否已构建（存在 dist 目录）"""
         dist_dir = os.path.join(path, "dist")
@@ -2024,8 +466,10 @@ class FireflyBlogManager(Star):
         
         # 检查内存（使用配置的阈值，默认 1536MB = 1.5GB）
         memory_threshold = self.config.get("build_memory_threshold", 1536)
+        if psutil is None:
+            logger.warning("[Firefly] psutil 未安装，跳过内存检查")
+            return True, "资源检查：psutil 未安装，跳过内存检查"
         try:
-            import psutil
             mem = psutil.virtual_memory()
             available_mb = mem.available / (1024 ** 2)
             total_mb = mem.total / (1024 ** 2)
@@ -2036,12 +480,9 @@ class FireflyBlogManager(Star):
             
             logger.info(f"[Firefly] 内存检查通过: {available_mb:.2f} MB 可用")
             return True, f"资源充足。可用内存: {available_mb:.2f} MB（总内存 {total_mb:.0f} MB，使用率 {used_percent:.1f}%）"
-        except ImportError:
-            logger.warning("[Firefly] psutil 未安装，跳过内存检查")
-            return True, "资源检查：psutil 未安装，跳过内存检查"
         except Exception as e:
             logger.error(f"[Firefly] 内存检查失败: {e}")
-            return True, f"资源检查：内存检查失败 ({e})，继续执行"
+            return True, "资源检查：内存检查失败，继续执行"
 
     def _get_disk_path_for_check(self) -> str:
         """获取用于磁盘空间检查的路径（跨平台兼容）"""
@@ -2061,10 +502,11 @@ class FireflyBlogManager(Star):
             return "/"
 
     
-    def _check_memory_status(self) -> tuple[bool, str]:
+    def _check_memory_status(self) -> str:
         """检查当前内存状态，返回详细信息"""
+        if psutil is None:
+            return "[ERROR] psutil 未安装，无法检查内存状态。请安装 psutil: pip install psutil"
         try:
-            import psutil
             mem = psutil.virtual_memory()
             available_mb = mem.available / (1024 ** 2)
             total_mb = mem.total / (1024 ** 2)
@@ -2072,9 +514,10 @@ class FireflyBlogManager(Star):
             memory_threshold = self.config.get("build_memory_threshold", 1536)
             
             status = "[OK]" if available_mb >= memory_threshold else "[WARNING]"
-            return True, f"{status} 当前内存状态:\n- 总内存: {total_mb:.0f} MB\n- 可用内存: {available_mb:.2f} MB\n- 使用率: {used_percent:.1f}%\n- 构建阈值: {memory_threshold} MB\n- 是否满足构建条件: {'是' if available_mb >= memory_threshold else '否'}"
-        except ImportError:
-            return False, "[ERROR] psutil 未安装，无法检查内存状态。请安装 psutil: pip install psutil"
+            return f"{status} 当前内存状态:\n- 总内存: {total_mb:.0f} MB\n- 可用内存: {available_mb:.2f} MB\n- 使用率: {used_percent:.1f}%\n- 构建阈值: {memory_threshold} MB\n- 是否满足构建条件: {'是' if available_mb >= memory_threshold else '否'}"
+        except Exception as e:
+            logger.error(f"[Firefly] 内存检查失败: {e}")
+            return "[ERROR] 内存检查失败，请查看日志获取详细信息"
 
     def _find_local_blog_root(self) -> tuple[str, bool, bool]:
         """智能查找本地已部署的 Firefly 博客目录
@@ -2127,7 +570,7 @@ class FireflyBlogManager(Star):
 
         # 检查路径是否包含 Firefly 博客特征文件（大小写不敏感）
         for path in search_paths:
-            if self._is_firefly_blog(path):
+            if is_firefly_blog_local(path):
                 is_built = self._is_blog_built(path)
                 logger.info(f"[Firefly] 自动检测到博客目录: {path} (已构建: {is_built})")
                 return path, is_built, True
@@ -2137,7 +580,7 @@ class FireflyBlogManager(Star):
 
     def _init_components(self):
         """根据配置初始化文件系统、博客管理器和构建部署管理器"""
-        deploy_mode = DeployMode(self.config.get("deploy_mode", "local_build"))
+        deploy_mode = parse_deploy_mode(self.config.get("deploy_mode", "local_build"))
         
         # local_build 和 local_only 模式下智能检测博客目录
         if deploy_mode in (DeployMode.LOCAL_BUILD, DeployMode.LOCAL_ONLY):
@@ -2152,6 +595,7 @@ class FireflyBlogManager(Star):
             blog_root = self.config.get("remote_blog_root", DEFAULT_BLOG_ROOT)
         
         posts_dir = os.path.join(blog_root, "src", "content", "posts")
+        self.src_root = os.path.join(blog_root, "src")
 
         if deploy_mode == DeployMode.REMOTE_BUILD:
             # 远程构建模式：文章操作和构建都在远端
@@ -2159,6 +603,7 @@ class FireflyBlogManager(Star):
             self.fs = RemoteFileSystem(self.remote_executor)
             remote_blog_root = self.config.get("remote_blog_root", "/var/www/firefly")
             remote_posts_dir = posixpath.join(remote_blog_root, "src", "content", "posts")
+            self.src_root = posixpath.join(remote_blog_root, "src")
             self.blog_manager = BlogManager(self.fs, remote_posts_dir)
             self.build_manager = BuildDeployManager(
                 self.config, self.local_executor, self.remote_executor
@@ -2449,7 +894,15 @@ class FireflyBlogManager(Star):
         Args:
             keyword(string): 搜索关键词
         '''
+        results = await self._search_posts(keyword)
 
+        if not results:
+            yield f"[INFO] 未找到包含「{keyword}」的文章"
+        else:
+            yield self._format_post_list(results)
+
+    async def _search_posts(self, keyword: str) -> list[PostInfo]:
+        """按关键词搜索文章（标题/分类/标签），供 LLM 工具和显式命令共用"""
         posts = await self.blog_manager.list_posts()
         results = []
         keyword_lower = keyword.lower()
@@ -2459,11 +912,7 @@ class FireflyBlogManager(Star):
                     or keyword_lower in post.category.lower()
                     or any(keyword_lower in t.lower() for t in post.tags)):
                 results.append(post)
-
-        if not results:
-            yield f"[INFO] 未找到包含「{keyword}」的文章"
-        else:
-            yield self._format_post_list(results)
+        return results
 
     # ========================================================================
     # 构建部署 LLM 工具
@@ -2523,8 +972,7 @@ class FireflyBlogManager(Star):
         
         返回当前总内存、可用内存、使用率以及是否满足构建阈值。
         '''
-        ok, msg = self._check_memory_status()
-        yield msg
+        yield self._check_memory_status()
 
     @filter.llm_tool(name="check_build_resource")
     async def check_build_resource(self, event):
@@ -2560,8 +1008,9 @@ class FireflyBlogManager(Star):
         blog_root = self.build_manager.blog_root if self.build_manager else self.config.get("local_blog_root", DEFAULT_BLOG_ROOT)
         dist_path = os.path.join(blog_root, "dist")
         if self.build_manager and self.build_manager.deploy_mode == DeployMode.REMOTE_BUILD:
-            # 远程模式下，检查远程 dist
-            rc, _, _ = await self.build_manager.remote_executor.run(f"test -d {blog_root}/dist", timeout=5)
+            # 远程模式下，检查远端博客仓库的 dist（remote_blog_root）
+            remote_blog_root = self.build_manager.remote_blog_root
+            rc, _, _ = await self.build_manager.remote_executor.run(f"test -d {remote_blog_root}/dist", timeout=5)
             if rc != 0:
                 yield "[ERROR] 构建产物不存在，请先执行 build_blog"
                 return
@@ -2587,7 +1036,7 @@ class FireflyBlogManager(Star):
 
     async def _do_auto_setup(self):
         """执行自动设置的内部逻辑（提取出来避免代码重复）"""
-        deploy_mode = DeployMode(self.config.get("deploy_mode", "local_build"))
+        deploy_mode = parse_deploy_mode(self.config.get("deploy_mode", "local_build"))
         
         if deploy_mode not in (DeployMode.LOCAL_BUILD, DeployMode.LOCAL_ONLY):
             yield "[ERROR] 智能设置仅支持 local_build 和 local_only 模式"
@@ -2739,19 +1188,10 @@ class FireflyBlogManager(Star):
             category(string): 文章分类
             description(string): 文章描述/摘要
         '''
-        import uuid
-        
         submission_id = uuid.uuid4().hex[:12]
         submit_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         
-        user_id = (
-            getattr(event, 'user_id', None) or
-            getattr(event, 'sender_id', None) or
-            getattr(event, 'from_id', None) or
-            getattr(event, 'user_id_holder', None)
-        )
-        if user_id is not None:
-            user_id = str(user_id)
+        user_id = get_user_id(event)
         
         submission = {
             "id": submission_id,
@@ -2830,19 +1270,17 @@ class FireflyBlogManager(Star):
 
         submissions = self._list_submissions(status)
         if not submissions:
-            status_map = {"pending": "待审核", "approved": "已批准", "rejected": "已拒绝"}
-            yield f"[INFO] 暂无{status_map.get(status, '')}的投稿"
+            yield f"[INFO] 暂无{SUBMISSION_STATUS_TEXT.get(status, '')}的投稿"
             return
 
         stats = self._get_submission_stats()
         result = f"[INFO] 投稿列表（共 {stats['total']} 条 | 待审核 {stats['pending']} | 已批准 {stats['approved']} | 已拒绝 {stats['rejected']}）\n\n"
         for sub in submissions:
-            status_emoji = {"pending": "⏳", "approved": "✅", "rejected": "❌"}
-            result += f"{status_emoji.get(sub.status, '❓')} {sub.title}\n"
+            result += f"{SUBMISSION_STATUS_EMOJI.get(sub.status, '❓')} {sub.title}\n"
             result += f"   - 投稿 ID: `{sub.id}`\n"
             result += f"   - 作者: {sub.author_name or '匿名'}\n"
             result += f"   - 提交时间: {sub.submit_time}\n"
-            status_text = {"pending": "待审核", "approved": "已批准", "rejected": "已拒绝"}.get(sub.status, sub.status)
+            status_text = SUBMISSION_STATUS_TEXT.get(sub.status, sub.status)
             result += f"   - 状态: {status_text}\n"
             # AI 初审状态
             if sub.ai_review:
@@ -2878,7 +1316,7 @@ class FireflyBlogManager(Star):
         result += f"作者: {submission['author_name'] or '匿名'}\n"
         result += f"邮箱: {submission['author_email'] or '未提供'}\n"
         result += f"提交时间: {submission['submit_time']}\n"
-        result += f"状态: {'待审核' if submission['status'] == 'pending' else '已批准' if submission['status'] == 'approved' else '已拒绝'}\n"
+        result += f"状态: {SUBMISSION_STATUS_TEXT.get(submission['status'], submission['status'])}\n"
         result += f"分类: {submission['category'] or '未设置'}\n"
         result += f"标签: {submission['tags'] or '未设置'}\n"
         result += f"描述: {submission['description'] or '未设置'}\n"
@@ -2908,7 +1346,7 @@ class FireflyBlogManager(Star):
             return
 
         if submission["status"] != "pending":
-            status_text = {"pending": "待审核", "approved": "已批准", "rejected": "已拒绝"}.get(
+            status_text = SUBMISSION_STATUS_TEXT.get(
                 submission["status"], submission["status"]
             )
             yield f"[ERROR] 投稿状态错误，当前状态: {status_text}"
@@ -2959,7 +1397,7 @@ class FireflyBlogManager(Star):
             return
 
         if submission["status"] != "pending":
-            status_text = {"pending": "待审核", "approved": "已批准", "rejected": "已拒绝"}.get(
+            status_text = SUBMISSION_STATUS_TEXT.get(
                 submission["status"], submission["status"]
             )
             yield f"[ERROR] 投稿状态错误，当前状态: {status_text}"
@@ -3013,22 +1451,17 @@ class FireflyBlogManager(Star):
             return
 
         if submission.get("status") != "pending":
-            status_text = {"pending": "待审核", "approved": "已批准", "rejected": "已拒绝"}.get(
+            status_text = SUBMISSION_STATUS_TEXT.get(
                 submission.get("status"), submission.get("status")
             )
             yield f"[ERROR] 投稿状态为「{status_text}」，只有待审核的投稿才能撤回"
             return
 
         # 验证投稿者身份
-        user_id = (
-            getattr(event, 'user_id', None) or
-            getattr(event, 'sender_id', None) or
-            getattr(event, 'from_id', None) or
-            getattr(event, 'user_id_holder', None)
-        )
+        user_id = get_user_id(event)
         sub_user_id = submission.get("user_id")
-        if user_id is not None and sub_user_id is not None:
-            if str(user_id) != str(sub_user_id):
+        if user_id and sub_user_id is not None:
+            if user_id != str(sub_user_id):
                 yield f"[ERROR] 您只能撤回自己的投稿。该投稿由用户 {sub_user_id} 提交"
                 return
 
@@ -3233,12 +1666,7 @@ class FireflyBlogManager(Star):
         Args:
             keyword(string): 搜索关键词，按标题/分类/标签匹配
         """
-        posts = await self.blog_manager.list_posts()
-        results = []
-        keyword_lower = keyword.lower()
-        for post in posts:
-            if keyword_lower in post.title.lower() or keyword_lower in post.category.lower() or any(keyword_lower in tag.lower() for tag in post.tags):
-                results.append(post)
+        results = await self._search_posts(keyword)
         if not results:
             yield event.plain_result(f"[INFO] 未找到包含「{keyword}」的文章")
         else:
@@ -3290,21 +1718,13 @@ class FireflyBlogManager(Star):
             )
             return
 
-        import uuid
-        import time
-
         # 获取用户信息
         author_name = (
             getattr(event, 'sender_name', None) or
             getattr(event, 'user_name', None) or
             getattr(event, 'nickname', None) or "匿名用户"
         )
-        user_id = (
-            getattr(event, 'user_id', None) or
-            getattr(event, 'sender_id', None) or
-            getattr(event, 'from_id', None) or
-            getattr(event, 'user_id_holder', None) or ""
-        )
+        user_id = get_user_id(event)
 
         submission_id = uuid.uuid4().hex[:12]
         sub = {
@@ -3312,7 +1732,7 @@ class FireflyBlogManager(Star):
             "title": title.strip(),
             "content": content.strip(),
             "author_name": str(author_name),
-            "user_id": str(user_id) if user_id else "",
+            "user_id": user_id,
             "submit_time": time.strftime("%Y-%m-%d %H:%M:%S"),
             "status": "pending",
             "reject_reason": "",
@@ -3332,13 +1752,7 @@ class FireflyBlogManager(Star):
     @filter.command("我的投稿", alias=["我的提交", "投稿状态"], priority=5)
     async def cmd_my_submissions(self, event):
         """查看自己的投稿记录和状态"""
-        user_id = (
-            getattr(event, 'user_id', None) or
-            getattr(event, 'sender_id', None) or
-            getattr(event, 'from_id', None) or
-            getattr(event, 'user_id_holder', None) or ""
-        )
-        user_id = str(user_id) if user_id else ""
+        user_id = get_user_id(event)
 
         if not user_id:
             yield event.plain_result("[ERROR] 无法识别您的用户身份，请稍后再试")
@@ -3356,13 +1770,11 @@ class FireflyBlogManager(Star):
             return
 
         my_subs.sort(key=lambda x: x.submit_time, reverse=True)
-        status_emoji = {"pending": "⏳", "approved": "✅", "rejected": "❌"}
-        status_text = {"pending": "待审核", "approved": "已批准", "rejected": "已拒绝"}
 
         lines = ["📋 **我的投稿记录**", ""]
         for sub in my_subs:
-            emoji = status_emoji.get(sub.status, "❓")
-            text = status_text.get(sub.status, sub.status)
+            emoji = SUBMISSION_STATUS_EMOJI.get(sub.status, "❓")
+            text = SUBMISSION_STATUS_TEXT.get(sub.status, sub.status)
             lines.append(f"{emoji} {sub.title}")
             lines.append(f"   ID: `{sub.id}` | 状态: {text} | 提交: {sub.submit_time}")
             if sub.reject_reason:
@@ -3415,8 +1827,7 @@ class FireflyBlogManager(Star):
         submissions = sorted(self._submissions_cache.values(), key=lambda x: x["submit_time"], reverse=True)
         result = "[INFO] 投稿列表:\n"
         for sub in submissions:
-            status_map = {"pending": "[PENDING]", "approved": "[APPROVED]", "rejected": "[REJECTED]"}
-            status_str = status_map.get(sub["status"], "[UNKNOWN]")
+            status_str = SUBMISSION_STATUS_BADGE.get(sub["status"], "[UNKNOWN]")
             author = sub["author_name"] or "匿名"
             result += f"{status_str} {sub['title']} - {author} - {sub['submit_time']}\n"
         yield event.plain_result(result)
@@ -3425,8 +1836,7 @@ class FireflyBlogManager(Star):
     @require_admin
     async def cmd_memory_status(self, event):
         """检查当前内存状态（公开命令）"""
-        ok, msg = self._check_memory_status()
-        yield event.plain_result(msg)
+        yield event.plain_result(self._check_memory_status())
 
     @filter.command("博客帮助", alias=["博客菜单", "博客命令", "firefly帮助", "firefly"], priority=1)
     async def cmd_help(self, event):
@@ -3446,7 +1856,7 @@ class FireflyBlogManager(Star):
         mode_desc = mode_map.get(deploy_mode, deploy_mode)
 
         lines = [
-            f"🔥 **Firefly 博客管理插件 v1.3.5**",
+            f"🔥 **Firefly 博客管理插件 v{PLUGIN_VERSION}**",
             "",
             f"部署模式: `{deploy_mode}` ({mode_desc})",
             "",

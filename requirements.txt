@@ -1,2 +1,3 @@
 asyncssh>=2.14.0
 pyyaml>=6.0
+psutil>=5.9

@@ -85,10 +85,30 @@ REMOTE_WEB_ROOT=/var/www/firefly
 # 高级选项
 # ----------------------------------------
 # GitHub 镜像 (国内用户可使用镜像加速克隆)
-# 可用镜像:
-#   https://hubproxy.jiaozi.live/https://github.com
-#   https://ghproxy.com/https://github.com
+# 留空时自动依次尝试内置镜像（ghfast.top / gh-proxy.com / ghproxy.net），
+# 全部失败后回退官方地址，每个源最多等待 GIT_CLONE_TIMEOUT 秒
 GITHUB_MIRROR=
+
+# 一键启用国内网络加速（推荐国内用户设为 1）：
+#   1. 克隆自动尝试内置 GitHub 镜像
+#   2. npm/pnpm 自动使用 npmmirror 镜像源（可被 NPM_REGISTRY 覆盖）
+USE_CN_MIRROR=0
+
+# 自定义 npm/pnpm 镜像源，留空用官方源（USE_CN_MIRROR=1 时自动为 npmmirror）
+# 示例: NPM_REGISTRY=https://registry.npmmirror.com
+NPM_REGISTRY=
+
+# git 克隆深度（1=浅克隆最快；0=完整克隆）
+CLONE_DEPTH=1
+
+# 单个克隆源最多等待秒数（防止网络不通时无限卡住）
+GIT_CLONE_TIMEOUT=120
+
+# 远程命令总超时秒数（remote_build 模式，构建慢时可调大）
+REMOTE_CMD_TIMEOUT=3600
+
+# 1 = 跳过所有交互确认（资源告警等），非交互终端自动生效
+AUTO_YES=0
 
 # 是否自动备份旧版本 (true/false)
 AUTO_BACKUP=true

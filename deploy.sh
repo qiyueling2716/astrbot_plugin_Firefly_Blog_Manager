@@ -31,10 +31,11 @@ PLUGIN_NAME="astrbot_plugin_Firefly_Blog_Manager"
 # Firefly blog repository
 FIREFLY_REPO="https://github.com/qiyueling2716/Firefly-Blog"
 
-# GitHub mirror sites for faster cloning in China
+# GitHub mirror sites (tried in order; each gets GIT_CLONE_TIMEOUT seconds)
 declare -a GITHUB_MIRRORS=(
-    "https://hubproxy.jiaozi.live/https://github.com"
-    "https://ghproxy.com/https://github.com"
+    "https://ghfast.top/https://github.com"
+    "https://gh-proxy.com/https://github.com"
+    "https://ghproxy.net/https://github.com"
 )
 
 # =============================================================================
@@ -74,6 +75,18 @@ GITHUB_MIRROR="${GITHUB_MIRROR:-}"
 AUTO_BACKUP="${AUTO_BACKUP:-true}"
 BACKUP_RETENTION_DAYS="${BACKUP_RETENTION_DAYS:-7}"
 
+# 网络与超时（下载慢 / 卡住的调优项）
+# USE_CN_MIRROR=1 时自动使用国内镜像（GitHub 克隆候选 + npm/pnpm registry）
+USE_CN_MIRROR="${USE_CN_MIRROR:-0}"
+NPM_REGISTRY="${NPM_REGISTRY:-}"     # npm/pnpm 源，默认官方（USE_CN_MIRROR=1 时自动用 npmmirror）
+CLONE_DEPTH="${CLONE_DEPTH:-1}"      # git 浅克隆深度，0 表示完整克隆
+GIT_CLONE_TIMEOUT="${GIT_CLONE_TIMEOUT:-120}"   # 单个克隆源最多等待秒数
+NET_CONNECT_TIMEOUT="${NET_CONNECT_TIMEOUT:-15}" # 连接超时秒数（curl/ssh）
+NET_TOTAL_TIMEOUT="${NET_TOTAL_TIMEOUT:-300}"    # 下载类请求总超时秒数
+AUTO_YES="${AUTO_YES:-0}"            # 1 = 跳过所有交互确认（非交互终端自动生效）
+RSYNC_TIMEOUT="${RSYNC_TIMEOUT:-60}" # rsync 传输超时秒数
+REMOTE_CMD_TIMEOUT="${REMOTE_CMD_TIMEOUT:-3600}" # 远程构建命令总超时秒数
+
 # =============================================================================
 # 辅助函数
 # =============================================================================
@@ -105,6 +118,94 @@ command_exists() {
 version_ge() {
     # 比较版本号 $1 >= $2
     printf '%s\n%s\n' "$2" "$1" | sort -V -C
+}
+
+# =============================================================================
+# 网络与交互工具（防卡住 / 加速下载）
+# =============================================================================
+
+# 带超时的 curl：连接 15s，总时长 300s（可配置），失败返回非 0
+curl_safe() {
+    curl -fsSL --connect-timeout "$NET_CONNECT_TIMEOUT" --max-time "$NET_TOTAL_TIMEOUT" "$@"
+}
+
+# npm/pnpm 源解析：USE_CN_MIRROR=1 且未显式指定时自动用 npmmirror
+npm_registry() {
+    if [[ -n "$NPM_REGISTRY" ]]; then
+        echo "$NPM_REGISTRY"
+    elif [[ "$USE_CN_MIRROR" == "1" ]]; then
+        echo "https://registry.npmmirror.com"
+    fi
+}
+
+# 在博客项目写入 .npmrc（镜像源 + 重试/超时策略，防止 pnpm 静默卡住）
+write_npmrc() {
+    local blog_root="$1"
+    local reg
+    reg=$(npm_registry)
+    {
+        echo "fetch-retries=3"
+        echo "fetch-retry-mintimeout=2000"
+        echo "fetch-retry-maxtimeout=60000"
+        echo "fetch-timeout=120000"
+        [[ -n "$reg" ]] && echo "registry=$reg"
+    } > "$blog_root/.npmrc"
+}
+
+# 交互确认：非交互终端（CI / 后台 / nohup）自动继续，避免脚本永久挂起
+confirm_or_continue() {
+    local prompt="$1"
+    if [[ "$AUTO_YES" == "1" ]] || [[ ! -t 0 ]]; then
+        log_info "（检测到非交互环境或 AUTO_YES=1，自动继续）"
+        return 0
+    fi
+    read -r -p "$prompt (y/N) " -n 1 reply
+    echo
+    [[ "$reply" =~ ^[Yy]$ ]]
+}
+
+# Git 克隆源候选列表：显式 GITHUB_MIRROR → 内置镜像（USE_CN_MIRROR 或镜像自动 fallback）→ 官方
+clone_candidates() {
+    if [[ -n "$GITHUB_MIRROR" ]]; then
+        echo "${GITHUB_MIRROR}/qiyueling2716/Firefly-Blog.git"
+    fi
+    if [[ "$USE_CN_MIRROR" == "1" || -z "$GITHUB_MIRROR" ]]; then
+        for mirror in "${GITHUB_MIRRORS[@]}"; do
+            echo "${mirror}/qiyueling2716/Firefly-Blog.git"
+        done
+    fi
+    echo "$FIREFLY_REPO"
+}
+
+clone_firefly_repo() {
+    local blog_root="$1"
+    local parent_dir
+    parent_dir=$(dirname "$blog_root")
+    mkdir -p "$parent_dir"
+    [[ -d "$blog_root" ]] && rm -rf "$blog_root"   # 清理上次失败的残留目录
+
+    local depth_opts=()
+    if [[ "${CLONE_DEPTH:-1}" -gt 0 ]]; then
+        depth_opts=(--depth "$CLONE_DEPTH" --single-branch)
+    fi
+
+    local candidate
+    for candidate in $(clone_candidates); do
+        log_info "正在克隆（最多等待 ${GIT_CLONE_TIMEOUT}s）: $candidate"
+        if timeout "$GIT_CLONE_TIMEOUT" git clone "${depth_opts[@]}" "$candidate" "$blog_root" >/dev/null 2>&1; then
+            log_ok "克隆成功: $candidate"
+            return 0
+        fi
+        log_warn "克隆失败或超时，尝试下一个源..."
+        [[ -d "$blog_root" ]] && rm -rf "$blog_root"
+    done
+
+    log_error "所有克隆源均失败（网络不通 / 镜像失效 / 超时）"
+    log_info "可尝试："
+    log_info "  1. 检查网络连通性: curl -fsSL --connect-timeout 10 https://github.com"
+    log_info "  2. 手动指定镜像: GITHUB_MIRROR=https://ghfast.top/https://github.com ./deploy.sh"
+    log_info "  3. 手动克隆: git clone $FIREFLY_REPO $blog_root"
+    return 1
 }
 
 # =============================================================================
@@ -260,8 +361,8 @@ check_nodejs() {
 install_nodejs() {
     if command_exists apt; then
         log_info "使用 apt 安装 Node.js 22..."
-        curl -fsSL https://deb.nodesource.com/setup_22.x | bash - || {
-            log_warn "NodeSource 安装失败，尝试其他方式..."
+        curl_safe https://deb.nodesource.com/setup_22.x | bash - || {
+            log_warn "NodeSource 安装失败（网络超时？），尝试其他方式..."
         }
         apt-get install -y nodejs || {
             log_error "apt 安装 Node.js 失败"
@@ -269,7 +370,7 @@ install_nodejs() {
         }
     elif command_exists yum; then
         log_info "使用 yum 安装 Node.js 22..."
-        curl -fsSL https://rpm.nodesource.com/setup_22.x | bash - || {
+        curl_safe https://rpm.nodesource.com/setup_22.x | bash - || {
             log_error "yum 安装 Node.js 失败"
             exit 1
         }
@@ -306,9 +407,11 @@ check_pnpm() {
 }
 
 install_pnpm() {
+    local reg
+    reg=$(npm_registry)
     if command_exists npm; then
-        log_info "使用 npm 安装 pnpm..."
-        npm install -g pnpm
+        log_info "使用 npm 安装 pnpm...${reg:+（源: $reg）}"
+        npm install -g pnpm ${reg:+--registry="$reg"}
     elif command_exists corepack; then
         log_info "使用 corepack 安装 pnpm..."
         corepack enable
@@ -340,50 +443,10 @@ check_firefly_project() {
     fi
 
     if [[ ! -f "$blog_root/package.json" ]]; then
-        log_warn "博客目录为空，正在克隆 Firefly 仓库..."
-
-        # 确定要使用的镜像或原始地址
-        local clone_url="$FIREFLY_REPO"
-        if [[ -n "$GITHUB_MIRROR" ]]; then
-            clone_url="${GITHUB_MIRROR}/qiyueling2716/Firefly-Blog.git"
-            log_info "使用镜像: $clone_url"
-        fi
+        log_warn "博客目录为空或未完成初始化，正在克隆 Firefly 仓库..."
 
         if command_exists git; then
-            local parent_dir
-            parent_dir=$(dirname "$blog_root")
-            mkdir -p "$parent_dir"
-
-            # 尝试镜像
-            local clone_success=false
-            if [[ -n "$GITHUB_MIRROR" ]]; then
-                if git clone "${GITHUB_MIRROR}/qiyueling2716/Firefly-Blog.git" "$blog_root" 2>/dev/null; then
-                    clone_success=true
-                fi
-            fi
-
-            # 尝试官方地址
-            if [[ "$clone_success" == false ]]; then
-                for mirror in "${GITHUB_MIRRORS[@]}"; do
-                    log_info "尝试镜像: $mirror"
-                    if git clone "${mirror}/qiyueling2716/Firefly-Blog.git" "$blog_root" 2>/dev/null; then
-                        clone_success=true
-                        break
-                    fi
-                done
-            fi
-
-            # 最后尝试官方地址
-            if [[ "$clone_success" == false ]]; then
-                if git clone "$FIREFLY_REPO" "$blog_root"; then
-                    clone_success=true
-                fi
-            fi
-
-            if [[ "$clone_success" == true ]]; then
-                log_ok "Firefly 博客克隆成功"
-            else
-                log_error "克隆失败，请手动执行: git clone $FIREFLY_REPO $blog_root"
+            if ! clone_firefly_repo "$blog_root"; then
                 exit 1
             fi
         else
@@ -407,11 +470,11 @@ check_firefly_project() {
 # =============================================================================
 
 get_cpu_usage() {
-    # 获取 CPU 使用率（百分比）
+    # 获取 CPU 使用率（百分比，整数）
     if command_exists mpstat; then
-        mpstat 1 1 | awk '/Average:/ {print 100 - $NF}'
+        mpstat 1 1 | awk '/Average:/ {printf "%d", 100 - $NF}'
     elif command_exists top; then
-        top -bn1 | awk '/%Cpu/ {print 100 - $8}'
+        top -bn1 | awk '/%Cpu/ {printf "%d", 100 - $8; exit}'
     elif [[ -f /proc/stat ]]; then
         # 从 /proc/stat 计算 CPU 使用率
         local cpu_line1=$(grep '^cpu ' /proc/stat)
@@ -541,9 +604,7 @@ install_blog_deps() {
     
     if [[ "$resource_warning" -eq 1 ]]; then
         log_warn "资源使用较高，继续安装依赖可能会影响系统性能"
-        read -p "是否继续安装? (y/N) " -n 1 -r
-        echo
-        if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+        if ! confirm_or_continue "是否继续安装?"; then
             log_info "用户取消安装"
             exit 0
         fi
@@ -554,12 +615,28 @@ install_blog_deps() {
         return
     fi
 
+    # 写入 .npmrc（镜像源 + 重试/超时策略，避免静默卡住）
+    write_npmrc "$blog_root"
+    local reg
+    reg=$(npm_registry)
+
+    log_info "执行 pnpm install ...${reg:+（源: $reg）}"
     if ! pnpm install; then
+        # 官方源失败时，自动用国内镜像重试一次
+        if [[ -n "$reg" || "$USE_CN_MIRROR" == "1" ]]; then
+            log_warn "pnpm install 失败，使用国内镜像重试一次..."
+            echo "registry=https://registry.npmmirror.com" > "$blog_root/.npmrc"
+            if pnpm install; then
+                log_ok "依赖安装成功（镜像源）"
+                return
+            fi
+        fi
         log_error "pnpm install 失败"
         log_info "可能的原因:"
         log_info "  1. 网络连接问题"
         log_info "  2. 磁盘空间不足"
         log_info "  3. pnpm 镜像配置问题"
+        log_info "可尝试: USE_CN_MIRROR=1 ./deploy.sh 使用国内镜像，或查看 ${blog_root}/.npmrc"
         exit 1
     fi
 
@@ -589,9 +666,7 @@ build_blog() {
     if [[ "$resource_warning" -eq 1 ]]; then
         log_warn "⚠️ 系统资源使用率较高，构建过程可能耗时较长或失败"
         log_warn "  当前状态可能导致内存不足或 CPU 过载"
-        read -p "是否继续构建? (y/N) " -n 1 -r
-        echo
-        if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+        if ! confirm_or_continue "是否继续构建?"; then
             log_info "用户取消构建"
             exit 0
         fi
@@ -667,12 +742,29 @@ backup_old_version() {
 # 9. 部署文件
 # =============================================================================
 
+# 博客源码关键项（部署目录与博客目录相同时需要保留的内容）
+BLOG_SOURCE_KEEP=(
+    src public node_modules .git package.json pnpm-lock.yaml pnpm-workspace.yaml
+    astro.config.mjs astro.config.ts svelte.config.js svelte.config.ts tsconfig.json
+    postcss.config.mjs postcss.config.js pagefind.yml wrangler.jsonc wrangler.toml
+    vercel.json biome.json LICENSE README.md README.en.md CLAUDE.md .gitignore
+    .npmrc _frontmatter.json docs scripts .github dist
+)
+
 deploy_files() {
     local dist_dir="$1"
     local web_root="$2"
     log_step "9. 部署文件..."
 
     log_info "部署: $dist_dir -> $web_root"
+
+    # 构建产物可能位于 web_root 内部（默认配置 LOCAL_BLOG_ROOT 与 WEB_ROOT 相同）。
+    # 此时直接 rm -rf "$web_root"/* 会把刚构建的 dist/ 和整个博客源码一起删除，
+    # 必须先把产物与源码关键项移出，清空后再放回。
+    local same_root=false
+    case "$dist_dir" in
+        "$web_root"|"$web_root"/*) same_root=true ;;
+    esac
 
     # 确保父目录存在
     local web_root_parent
@@ -684,13 +776,38 @@ deploy_files() {
     # 备份旧版本
     backup_old_version "$web_root"
 
+    local staging
+    staging=$(mktemp -d)
+    cp -r "$dist_dir"/* "$staging/"
+
+    local src_staging=""
+    if [[ "$same_root" == true ]]; then
+        log_warn "WEB_ROOT 与博客目录相同：部署时将保留博客源码（src/、node_modules、package.json 等）"
+        src_staging=$(mktemp -d)
+        local item
+        for item in "${BLOG_SOURCE_KEEP[@]}"; do
+            if [[ -e "$web_root/$item" ]]; then
+                mv "$web_root/$item" "$src_staging/"
+            fi
+        done
+    fi
+
     # 清空并复制新构建产物
     if [[ -d "$web_root" ]]; then
         rm -rf "$web_root"/*
     else
         mkdir -p "$web_root"
     fi
-    cp -r "$dist_dir"/* "$web_root/"
+    cp -r "$staging"/* "$web_root/"
+    rm -rf "$staging"
+
+    # 恢复博客源码
+    if [[ "$same_root" == true ]]; then
+        if compgen -G "$src_staging/*" > /dev/null 2>&1; then
+            mv "$src_staging"/* "$web_root/"
+        fi
+        rm -rf "$src_staging"
+    fi
 
     log_ok "文件部署完成: $web_root"
 }
@@ -1038,12 +1155,12 @@ deploy_local_to_remote() {
         exit 1
     fi
 
-    local ssh_opts="-p $SERVER_PORT -o StrictHostKeyChecking=no -o ConnectTimeout=10"
+    local ssh_opts="-p $SERVER_PORT -o StrictHostKeyChecking=no -o ConnectTimeout=$NET_CONNECT_TIMEOUT -o ServerAliveInterval=30 -o ServerAliveCountMax=3"
     if [[ "$AUTH_TYPE" == "key" && -n "$PRIVATE_KEY_PATH" && -f "$PRIVATE_KEY_PATH" ]]; then
         ssh_opts="$ssh_opts -i $PRIVATE_KEY_PATH"
     fi
 
-    # 在远程服务器上执行部署
+    # 在远程服务器上执行部署（总时长受限，防止卡住）
     local remote_cmds="
         set -e
         # 创建部署目录
@@ -1059,15 +1176,21 @@ deploy_local_to_remote() {
             log_error "密码认证需要 sshpass，请先安装: sudo apt install sshpass"
             exit 1
         fi
-        sshpass -p "$PASSWORD" ssh $ssh_opts "$USERNAME@$SERVER_IP" "$remote_cmds"
+        timeout "$REMOTE_CMD_TIMEOUT" sshpass -p "$PASSWORD" ssh $ssh_opts "$USERNAME@$SERVER_IP" "$remote_cmds" || {
+            log_error "远程命令执行失败或超时（${REMOTE_CMD_TIMEOUT}s）"
+            exit 1
+        }
     else
-        ssh $ssh_opts "$USERNAME@$SERVER_IP" "$remote_cmds"
+        timeout "$REMOTE_CMD_TIMEOUT" ssh $ssh_opts "$USERNAME@$SERVER_IP" "$remote_cmds" || {
+            log_error "远程命令执行失败或超时（${REMOTE_CMD_TIMEOUT}s）"
+            exit 1
+        }
     fi
 
     # 优先使用 rsync
     if command_exists rsync; then
         log_info "使用 rsync 同步文件..."
-        local rsync_opts="-avz --delete"
+        local rsync_opts="-avz --delete --timeout=$RSYNC_TIMEOUT --contimeout=$NET_CONNECT_TIMEOUT"
 
         if [[ "$AUTH_TYPE" == "password" && -n "$PASSWORD" ]]; then
             if command_exists sshpass; then
@@ -1112,7 +1235,7 @@ deploy_via_scp() {
 
     log_info "使用 scp 同步文件..."
 
-    local ssh_opts="-P $port -o StrictHostKeyChecking=no"
+    local ssh_opts="-P $port -o StrictHostKeyChecking=no -o ConnectTimeout=$NET_CONNECT_TIMEOUT"
     if [[ "$auth_type" == "key" && -n "$PRIVATE_KEY_PATH" && -f "$PRIVATE_KEY_PATH" ]]; then
         ssh_opts="$ssh_opts -i $PRIVATE_KEY_PATH"
     fi
@@ -1148,10 +1271,13 @@ configure_web_server_remote() {
     fi
 
     if [[ -n "$remote_cmds" ]]; then
+        local remote_ssh_opts="-p $SERVER_PORT -o StrictHostKeyChecking=no -o ConnectTimeout=$NET_CONNECT_TIMEOUT -o ServerAliveInterval=30 -o ServerAliveCountMax=3"
         if [[ "$AUTH_TYPE" == "password" && -n "$PASSWORD" ]]; then
-            sshpass -p "$PASSWORD" ssh -p "$SERVER_PORT" -o StrictHostKeyChecking=no "$USERNAME@$SERVER_IP" "$remote_cmds"
+            sshpass -p "$PASSWORD" ssh $remote_ssh_opts "$USERNAME@$SERVER_IP" "$remote_cmds"
+        elif [[ -n "$PRIVATE_KEY_PATH" && -f "$PRIVATE_KEY_PATH" ]]; then
+            ssh $remote_ssh_opts -i "$PRIVATE_KEY_PATH" "$USERNAME@$SERVER_IP" "$remote_cmds"
         else
-            ssh -p "$SERVER_PORT" -o StrictHostKeyChecking=no -i "$PRIVATE_KEY_PATH" "$USERNAME@$SERVER_IP" "$remote_cmds"
+            ssh $remote_ssh_opts "$USERNAME@$SERVER_IP" "$remote_cmds"
         fi
     fi
 }
@@ -1190,9 +1316,29 @@ deploy_remote() {
         exit 1
     fi
 
-    local ssh_opts="-p $SERVER_PORT -o StrictHostKeyChecking=no -o ConnectTimeout=10"
+    local ssh_opts="-p $SERVER_PORT -o StrictHostKeyChecking=no -o ConnectTimeout=$NET_CONNECT_TIMEOUT -o ServerAliveInterval=30 -o ServerAliveCountMax=3"
     if [[ "$AUTH_TYPE" == "key" && -n "$PRIVATE_KEY_PATH" && -f "$PRIVATE_KEY_PATH" ]]; then
         ssh_opts="$ssh_opts -i $PRIVATE_KEY_PATH"
+    fi
+
+    # 远程端克隆源（按本地配置生成候选命令）
+    local clone_cmd
+    local candidate
+    if [[ -n "$GITHUB_MIRROR" ]]; then
+        clone_cmd="git clone --depth ${CLONE_DEPTH:-1} ${GITHUB_MIRROR}/qiyueling2716/Firefly-Blog.git . 2>/dev/null || git clone $FIREFLY_REPO ."
+    elif [[ "$USE_CN_MIRROR" == "1" ]]; then
+        for candidate in "${GITHUB_MIRRORS[@]}" "$FIREFLY_REPO"; do
+            clone_cmd="${clone_cmd:-git clone --depth ${CLONE_DEPTH:-1} ${candidate}/qiyueling2716/Firefly-Blog.git . 2>/dev/null || }"
+        done
+        clone_cmd="${clone_cmd}git clone $FIREFLY_REPO ."
+    else
+        clone_cmd="git clone --depth ${CLONE_DEPTH:-1} $FIREFLY_REPO ."
+    fi
+
+    # 注意：此判断必须在本地完成，远端 shell 没有这些变量。
+    local same_dir_remote=0
+    if [[ "$REMOTE_WEB_ROOT" == "$REMOTE_BLOG_ROOT" || "$REMOTE_WEB_ROOT" == "$REMOTE_BLOG_ROOT"/* ]]; then
+        same_dir_remote=1
     fi
 
     local remote_cmds="
@@ -1202,7 +1348,8 @@ deploy_remote() {
         # 克隆仓库（如果不存在）
         if [ ! -f package.json ]; then
             echo 'Cloning Firefly repository...'
-            $([[ -n "$GITHUB_MIRROR" ]] && echo "git clone ${GITHUB_MIRROR}/qiyueling2716/Firefly-Blog.git ." || echo "git clone $FIREFLY_REPO .")
+            mkdir -p $REMOTE_BLOG_ROOT
+            $clone_cmd
         fi
 
         # 安装依赖
@@ -1219,22 +1366,36 @@ deploy_remote() {
         echo 'Deploying...'
         mkdir -p $REMOTE_WEB_ROOT
         $([[ "$AUTO_BACKUP" == "true" ]] && echo "if [ -d \"$REMOTE_WEB_ROOT\" ] && [ \"\$(ls -A $REMOTE_WEB_ROOT 2>/dev/null)\" ]; then cp -r $REMOTE_WEB_ROOT ${REMOTE_WEB_ROOT}.backup.\$(date +%Y%m%d%H%M%S); fi")
-        rm -rf $REMOTE_WEB_ROOT/*
-        cp -r $REMOTE_BLOG_ROOT/dist/* $REMOTE_WEB_ROOT/
+        if [ $same_dir_remote = 1 ]; then
+            echo 'WARN: REMOTE_WEB_ROOT 与 REMOTE_BLOG_ROOT 相同，跳过清空，仅覆盖部署（保留博客源码）'
+            cp -r $REMOTE_BLOG_ROOT/dist/* $REMOTE_WEB_ROOT/
+        else
+            STAGING=\$(mktemp -d)
+            cp -r $REMOTE_BLOG_ROOT/dist/* \$STAGING/
+            rm -rf $REMOTE_WEB_ROOT/*
+            cp -r \$STAGING/* $REMOTE_WEB_ROOT/
+            rm -rf \$STAGING
+        fi
 
         echo 'Done'
     "
 
-    log_info "在远程服务器 $SERVER_IP 执行构建..."
+    log_info "在远程服务器 $SERVER_IP 执行构建（总超时 ${REMOTE_CMD_TIMEOUT}s）..."
 
     if [[ "$AUTH_TYPE" == "password" && -n "$PASSWORD" ]]; then
         if ! command_exists sshpass; then
             log_error "密码认证需要 sshpass"
             exit 1
         fi
-        sshpass -p "$PASSWORD" ssh $ssh_opts "$USERNAME@$SERVER_IP" "$remote_cmds"
+        timeout "$REMOTE_CMD_TIMEOUT" sshpass -p "$PASSWORD" ssh $ssh_opts "$USERNAME@$SERVER_IP" "$remote_cmds" || {
+            log_error "远程执行失败或超时（${REMOTE_CMD_TIMEOUT}s），可调大 REMOTE_CMD_TIMEOUT"
+            exit 1
+        }
     else
-        ssh $ssh_opts "$USERNAME@$SERVER_IP" "$remote_cmds"
+        timeout "$REMOTE_CMD_TIMEOUT" ssh $ssh_opts "$USERNAME@$SERVER_IP" "$remote_cmds" || {
+            log_error "远程执行失败或超时（${REMOTE_CMD_TIMEOUT}s），可调大 REMOTE_CMD_TIMEOUT"
+            exit 1
+        }
     fi
 
     log_ok "远程构建部署完成"
@@ -1268,7 +1429,7 @@ main() {
     echo ""
     echo "========================================"
     echo "  AstrBot Firefly Blog Manager"
-    echo "  一键部署脚本 v1.0"
+    echo "  一键部署脚本 v2.0"
     echo "========================================"
     echo ""
     echo "部署模式: $DEPLOY_MODE"

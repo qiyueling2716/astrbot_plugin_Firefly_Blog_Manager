@@ -2,7 +2,11 @@
   "deploy_mode": {
     "type": "string",
     "description": "选择博客构建部署方式。local_build: 本地构建后通过SSH部署到远端; remote_build: 直接在远端服务器构建; local_only: 博客和AstrBot在同一台机器",
-    "options": ["local_build", "remote_build", "local_only"],
+    "options": [
+      "local_build",
+      "remote_build",
+      "local_only"
+    ],
     "default": "local_build"
   },
   "local_blog_root": {
@@ -31,7 +35,10 @@
   "auth_type": {
     "type": "string",
     "description": "SSH 认证方式",
-    "options": ["key", "password"],
+    "options": [
+      "key",
+      "password"
+    ],
     "default": "key"
   },
   "private_key_path": {
@@ -131,5 +138,15 @@
     "type": "bool",
     "description": "是否启用 AI 初审功能。开启后，每当有新投稿提交时，AI 会自动对投稿内容进行初审评估（内容质量、格式规范、完整性等），并给出过审/打回建议。管理员可在审核时直接查看 AI 初审结果，大幅提升审核效率",
     "default": true
+  },
+  "external_config_files": {
+    "type": "list",
+    "description": "归入「对外展示」页管理的配置文件（友链/关于我-社交链接/页脚等）。默认已包含 friendsConfig.ts、profileConfig.ts、socialConfig.ts、footerConfig.ts，可在此追加自定义文件名",
+    "default": [
+      "friendsConfig.ts",
+      "profileConfig.ts",
+      "socialConfig.ts",
+      "footerConfig.ts"
+    ]
   }
 }

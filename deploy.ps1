@@ -6,10 +6,29 @@ param(
 
 $SCRIPT_DIR = $PSScriptRoot
 $FIREFLY_REPO = "https://github.com/qiyueling2716/Firefly-Blog"
+$GITHUB_MIRRORS = @(
+    "https://ghfast.top/https://github.com",
+    "https://gh-proxy.com/https://github.com",
+    "https://ghproxy.net/https://github.com"
+)
 
 $DeployMode = if ($env:DEPLOY_MODE) { $env:DEPLOY_MODE } else { "local_only" }
 $LocalBlogRoot = if ($env:LOCAL_BLOG_ROOT) { $env:LOCAL_BLOG_ROOT } else { "D:\www\firefly" }
 $WebRoot = if ($env:WEB_ROOT) { $env:WEB_ROOT } else { "D:\www\firefly" }
+
+# 网络加速选项：USE_CN_MIRROR=1 启用国内镜像（克隆候选 + npm/pnpm 源）
+$UseCnMirror = if ($env:USE_CN_MIRROR) { $env:USE_CN_MIRROR -eq "1" } else { $false }
+$NpmRegistry = if ($env:NPM_REGISTRY) { $env:NPM_REGISTRY } else { "" }
+$CloneDepth = if ($env:CLONE_DEPTH) { [int]$env:CLONE_DEPTH } else { 1 }
+$GitCloneTimeout = if ($env:GIT_CLONE_TIMEOUT) { [int]$env:GIT_CLONE_TIMEOUT } else { 120 }
+if ($UseCnMirror -and -not $NpmRegistry) { $NpmRegistry = "https://registry.npmmirror.com" }
+
+function Get-NpmRegistryArg {
+    if ($NpmRegistry) {
+        return "--registry=$NpmRegistry"
+    }
+    return $null
+}
 
 function Write-Info {
     Write-Host "[INFO] $args"
@@ -73,8 +92,13 @@ function Check-Pnpm {
     if (-not (Test-CommandExists "pnpm")) {
         Write-Warn "pnpm not found, installing via npm..."
         if (Test-CommandExists "npm") {
-            Write-Info "Installing pnpm..."
-            npm install -g pnpm
+            Write-Info "Installing pnpm...$(if ($NpmRegistry) { " (registry: $NpmRegistry)" })"
+            $regArg = Get-NpmRegistryArg
+            if ($regArg) {
+                npm install -g pnpm $regArg
+            } else {
+                npm install -g pnpm
+            }
             if ($LASTEXITCODE -eq 0) {
                 Write-Ok "pnpm installed"
             }
@@ -92,6 +116,58 @@ function Check-Pnpm {
     Write-Ok "pnpm $pnpmVersion"
 }
 
+function Clone-FireflyRepo {
+    param([string]$BlogRoot)
+
+    # 候选源：显式镜像 → 内置镜像（自动 fallback）→ 官方
+    $candidates = @()
+    if ($env:GITHUB_MIRROR) {
+        $candidates += "$($env:GITHUB_MIRROR)/qiyueling2716/Firefly-Blog.git"
+    }
+    if ($UseCnMirror -or -not $env:GITHUB_MIRROR) {
+        foreach ($m in $GITHUB_MIRRORS) {
+            $candidates += "$m/qiyueling2716/Firefly-Blog.git"
+        }
+    }
+    $candidates += $FIREFLY_REPO
+
+    $depthArgs = @()
+    if ($CloneDepth -gt 0) {
+        $depthArgs = @("--depth", "$CloneDepth", "--single-branch")
+    }
+
+    foreach ($cand in $candidates) {
+        Write-Info "Cloning (timeout ${GitCloneTimeout}s): $cand"
+        $scriptBlock = {
+            param($Cand, $Target, $DepthArgs)
+            git clone @DepthArgs $Cand $Target 2>&1 | ForEach-Object { Write-Output $_ }
+            Write-Output "GIT_EXIT_CODE=$LASTEXITCODE"
+        }
+        $job = Start-Job -ScriptBlock $scriptBlock -ArgumentList $cand, $BlogRoot, $depthArgs
+        if (-not (Wait-Job -Job $job -Timeout $GitCloneTimeout)) {
+            Stop-Job -Job $job -Force
+            Remove-Job -Job $job -Force
+            Write-Warn "Clone timed out after ${GitCloneTimeout}s, trying next source..."
+            if (Test-Path $BlogRoot) { Remove-Item $BlogRoot -Recurse -Force -ErrorAction SilentlyContinue }
+            continue
+        }
+        $jobOut = Receive-Job -Job $job -Keep
+        Remove-Job -Job $job -Force
+        $exitLine = $jobOut | Where-Object { $_ -match "^GIT_EXIT_CODE=(\d+)$" }
+        $exitCode = if ($exitLine) { [int]($exitLine -replace "GIT_EXIT_CODE=", "") } else { 1 }
+        if ($exitCode -eq 0) {
+            Write-Ok "Cloned successfully: $cand"
+            return $true
+        }
+        Write-Warn "Clone failed, trying next source..."
+        if (Test-Path $BlogRoot) { Remove-Item $BlogRoot -Recurse -Force -ErrorAction SilentlyContinue }
+    }
+
+    Write-Err "All clone sources failed (network / mirror down / timeout)"
+    Write-Info "Try: git clone $FIREFLY_REPO $BlogRoot"
+    return $false
+}
+
 function Check-FireflyProject {
     param([string]$BlogRoot)
 
@@ -107,12 +183,7 @@ function Check-FireflyProject {
         Write-Warn "Empty directory, cloning Firefly repository..."
 
         if (Test-CommandExists "git") {
-            Write-Info "Cloning $FIREFLY_REPO to $BlogRoot"
-            git clone $FIREFLY_REPO $BlogRoot 2>&1 | Out-Null
-            if ($LASTEXITCODE -eq 0) {
-                Write-Ok "Firefly cloned successfully"
-            } else {
-                Write-Err "Failed to clone repository"
+            if (-not (Clone-FireflyRepo $BlogRoot)) {
                 exit 1
             }
         } else {
@@ -135,6 +206,21 @@ function Install-BlogDeps {
         return
     }
 
+    # 写入 .npmrc（镜像源 + 重试/超时策略，防止 pnpm 静默卡住）
+    $npmrc = @(
+        "fetch-retries=3",
+        "fetch-retry-mintimeout=2000",
+        "fetch-retry-maxtimeout=60000",
+        "fetch-timeout=120000"
+    )
+    if ($NpmRegistry) {
+        $npmrc += "registry=$NpmRegistry"
+    }
+    Set-Content -Path (Join-Path $BlogRoot ".npmrc") -Value $npmrc -Encoding UTF8
+    if ($NpmRegistry) {
+        Write-Info "Using npm registry: $NpmRegistry"
+    }
+
     Push-Location $BlogRoot
     try {
         Write-Info "Running: pnpm install..."
@@ -144,6 +230,15 @@ function Install-BlogDeps {
         & pnpm install --reporter=default 2>&1 | ForEach-Object { Write-Host $_ }
         
         if ($LASTEXITCODE -ne 0) {
+            # 官方源失败时自动用国内镜像重试一次
+            if ($NpmRegistry) {
+                Write-Warn "pnpm install failed, retrying with $NpmRegistry ..."
+                & pnpm install --reporter=default --registry=$NpmRegistry 2>&1 | ForEach-Object { Write-Host $_ }
+                if ($LASTEXITCODE -eq 0) {
+                    Write-Ok "Dependencies installed (mirror registry)"
+                    return
+                }
+            }
             Write-Err "pnpm install failed with exit code $LASTEXITCODE"
             exit 1
         }
@@ -246,7 +341,7 @@ function Deploy-Files {
 function Main {
     Write-Host "========================================"
     Write-Host "  AstrBot Firefly Blog Manager"
-    Write-Host "  PowerShell Deployment Script v1.0"
+    Write-Host "  PowerShell Deployment Script v2.0"
     Write-Host "========================================"
     Write-Host "Deploy Mode: $DeployMode"
     Write-Host ""
