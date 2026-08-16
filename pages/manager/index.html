@@ -16,8 +16,10 @@
   </div>
   <nav>
     <button class="tab active" data-tab="status">状态</button>
+    <button class="tab" data-tab="links">站点配置</button>
     <button class="tab" data-tab="files">文件管理</button>
-    <button class="tab" data-tab="links">对外展示</button>
+    <button class="tab" data-tab="theme">主题配置</button>
+    <button class="tab" data-tab="plugin">插件配置</button>
   </nav>
 </header>
 
@@ -36,6 +38,18 @@
         <button id="btn-set-root" class="primary">保存并重载</button>
         <button id="btn-redetect">重新自动检测</button>
       </div>
+    </div>
+    <div class="panel">
+      <h3>构建与部署</h3>
+      <p class="hint">修改配置或文章后点击构建部署使博客生效（环境检查 → 依赖 → 构建 → 部署）</p>
+      <div class="row">
+        <button id="btn-build" class="primary">仅构建</button>
+        <button id="btn-deploy" class="primary">部署</button>
+      </div>
+      <div class="row">
+        <button id="btn-build-deploy" class="primary">构建并部署</button>
+      </div>
+      <pre id="build-log" class="mono"></pre>
     </div>
     <div class="panel">
       <h3>内存状态</h3>
@@ -70,8 +84,17 @@
 
   <section id="tab-links" class="tab-panel">
     <div class="panel">
+      <h3>友链</h3>
+      <p class="hint">博客友链页（/friends）展示的友链列表（src/config/friendsConfig.ts），保存后需重新构建部署生效</p>
+      <div id="friend-links" class="profile-links"></div>
+      <div class="row">
+        <button id="btn-add-friend">添加友链</button>
+        <button id="btn-save-friends" class="primary">保存友链</button>
+      </div>
+    </div>
+    <div class="panel">
       <div class="links-toolbar">
-        <span class="hint">对外展示内容：友链 / 社交链接 / 页脚等（列表编辑）</span>
+        <span class="hint">其他列表配置（页脚等）</span>
         <span class="spacer"></span>
         <button id="btn-add-ext">添加条目</button>
         <button id="btn-refresh-ext">刷新</button>
@@ -90,7 +113,192 @@
         </table>
       </div>
     </div>
+    <div class="panel">
+      <h3>站点信息</h3>
+      <p class="hint">站点基本信息（src/config/siteConfig.ts），保存后需重新构建并部署博客才生效</p>
+      <div class="site-form">
+        <label>站点标题<input id="site-title" type="text" spellcheck="false"></label>
+        <label>站点副标题<input id="site-subtitle" type="text" spellcheck="false"></label>
+        <label>站点 URL<input id="site-url" type="text" spellcheck="false"></label>
+        <label>站点描述<textarea id="site-description" rows="3" spellcheck="false"></textarea></label>
+        <label>站点关键词<input id="site-keywords" type="text" placeholder="逗号分隔，例如：博客, Astro, 技术" spellcheck="false"></label>
+      </div>
+      <div class="row">
+        <button id="btn-save-sitecfg" class="primary">保存站点配置</button>
+      </div>
+    </div>
+    <div class="panel">
+      <h3>站点信息（友链申请）</h3>
+      <p class="hint">friends 页"评论区留言/发送申请邮件至"展示的站点信息（src/content/spec/friends.mdx），含申请邮箱</p>
+      <div class="site-form">
+        <label>站点名称<input id="site2-name" type="text" spellcheck="false"></label>
+        <label>站点描述<input id="site2-desc" type="text" spellcheck="false"></label>
+        <label>站点链接<input id="site2-url" type="text" spellcheck="false"></label>
+        <label>头像链接<input id="site2-avatar" type="text" spellcheck="false"></label>
+        <label>申请邮箱<input id="site2-email" type="text" spellcheck="false"></label>
+      </div>
+      <div class="row">
+        <button id="btn-save-site2" class="primary">保存站点信息</button>
+      </div>
+    </div>
+    <div class="panel">
+      <h3>公告</h3>
+      <p class="hint">站点公告条（src/config/announcementConfig.ts），保存后需重新构建部署生效</p>
+      <div class="site-form">
+        <label>公告标题<input id="announce-title" type="text" spellcheck="false"></label>
+        <label>公告内容<input id="announce-content" type="text" spellcheck="false"></label>
+        <label class="inline-check"><input id="announce-closable" type="checkbox"> 允许用户关闭公告</label>
+        <label>链接文本<input id="announce-link-text" type="text" spellcheck="false"></label>
+        <label>链接 URL<input id="announce-link-url" type="text" spellcheck="false"></label>
+        <label class="inline-check"><input id="announce-link-enable" type="checkbox"> 启用链接</label>
+      </div>
+      <div class="row">
+        <button id="btn-save-announce" class="primary">保存公告</button>
+      </div>
+    </div>
+    <div class="panel">
+      <h3>音乐</h3>
+      <p class="hint">音乐播放器（src/config/musicConfig.ts），保存后需重新构建部署生效</p>
+      <div class="site-form">
+        <label>播放来源
+          <select id="music-mode">
+            <option value="meting">Meting API（歌单/单曲）</option>
+            <option value="local">本地音乐列表</option>
+          </select>
+        </label>
+        <label>音乐平台
+          <select id="music-server">
+            <option value="netease">网易云</option>
+            <option value="tencent">QQ 音乐</option>
+            <option value="kugou">酷狗</option>
+            <option value="xiami">虾米</option>
+            <option value="baidu">百度</option>
+          </select>
+        </label>
+        <label>歌单/单曲 ID<input id="music-id" type="text" spellcheck="false"></label>
+        <label class="inline-check"><input id="music-navbar" type="checkbox"> 在导航栏显示播放器入口</label>
+        <label class="inline-check"><input id="music-lyrics" type="checkbox"> 启用歌词</label>
+      </div>
+      <div class="row">
+        <button id="btn-save-music" class="primary">保存音乐配置</button>
+      </div>
+    </div>
+    <div class="panel">
+      <h3>留言板</h3>
+      <p class="hint">博客留言页（/guestbook）评论区配置（src/config/commentConfig.ts）</p>
+      <div class="site-form">
+        <label>评论系统
+          <select id="comment-type">
+            <option value="none">不启用</option>
+            <option value="twikoo">Twikoo</option>
+            <option value="waline">Waline</option>
+            <option value="giscus">Giscus</option>
+            <option value="disqus">Disqus</option>
+            <option value="artalk">Artalk</option>
+          </select>
+        </label>
+        <label id="comment-env-wrap" hidden>Twikoo envId / Waline serverURL<input id="comment-env" type="text" spellcheck="false"></label>
+      </div>
+      <div class="row">
+        <button id="btn-save-comment" class="primary">保存留言板配置</button>
+      </div>
+    </div>
+    <div class="panel">
+      <h3>打赏</h3>
+      <p class="hint">打赏页（/sponsor）（src/config/sponsorConfig.ts），保存后需重新构建部署生效</p>
+      <div class="site-form">
+        <label>页面标题<input id="sponsor-title" type="text" spellcheck="false"></label>
+        <label>页面描述<textarea id="sponsor-desc" rows="2" spellcheck="false"></textarea></label>
+        <label>打赏用途说明<textarea id="sponsor-usage" rows="2" spellcheck="false"></textarea></label>
+        <label class="inline-check"><input id="sponsor-show-list" type="checkbox"> 显示打赏者列表</label>
+        <label class="inline-check"><input id="sponsor-show-comment" type="checkbox"> 显示评论区</label>
+        <label class="inline-check"><input id="sponsor-post-btn" type="checkbox"> 文章详情页底部显示打赏按钮</label>
+      </div>
+      <p class="hint">打赏方式：</p>
+      <div id="sponsor-methods" class="profile-links"></div>
+      <div class="row">
+        <button id="btn-add-method">添加打赏方式</button>
+      </div>
+      <p class="hint">打赏者：</p>
+      <div id="sponsor-list" class="profile-links"></div>
+      <div class="row">
+        <button id="btn-add-sponsor">添加打赏者</button>
+        <button id="btn-save-sponsor" class="primary">保存打赏配置</button>
+      </div>
+    </div>
+    <div class="panel">
+      <h3>相册</h3>
+      <p class="hint">相册页（/gallery）（src/config/galleryConfig.ts），图片需放在 public/gallery/&lt;相册id&gt;/ 目录</p>
+      <div class="site-form">
+        <label>瀑布流最小列宽（px）<input id="gallery-column" type="number" spellcheck="false"></label>
+      </div>
+      <p class="hint">相册列表：</p>
+      <div id="gallery-albums" class="profile-links"></div>
+      <div class="row">
+        <button id="btn-add-album">添加相册</button>
+        <button id="btn-save-gallery" class="primary">保存相册配置</button>
+      </div>
+    </div>
+    <div class="panel">
+      <h3>关于我</h3>
+      <p class="hint">主页 / 关于页展示的头像、姓名、签名与社交链接（src/config/profileConfig.ts）</p>
+      <div class="site-form">
+        <label>头像<input id="profile-avatar" type="text" spellcheck="false"></label>
+        <label>名字<input id="profile-name" type="text" spellcheck="false"></label>
+        <label>个人签名<input id="profile-bio" type="text" spellcheck="false"></label>
+        <label>邮箱<input id="profile-email" type="text" placeholder="mailto:xxx@example.com 或 https://example.com/contact" spellcheck="false"></label>
+      </div>
+      <p class="hint">社交链接（除邮箱外的其他链接）：</p>
+      <div id="profile-links" class="profile-links"></div>
+      <div class="row">
+        <button id="btn-add-profile-link">添加链接</button>
+        <button id="btn-save-profile" class="primary">保存关于我</button>
+      </div>
+    </div>
+    <div class="panel">
+      <h3>RSS</h3>
+      <p class="hint">RSS 订阅源由站点信息自动生成（站点标题/副标题/URL），无需单独配置</p>
+      <div class="site-form">
+        <label>订阅地址<input id="rss-url" type="text" readonly spellcheck="false"></label>
+      </div>
+    </div>
   </section>
+
+  <section id="tab-theme" class="tab-panel">
+    <div class="theme-layout">
+      <aside class="theme-modules">
+        <div class="tree-toolbar">
+          <span class="tree-label">主题配置（src/config）</span>
+          <button id="btn-refresh-theme" title="刷新模块列表">刷新</button>
+        </div>
+        <div id="theme-groups"></div>
+      </aside>
+      <div class="theme-editor">
+        <div class="editor-toolbar">
+          <span id="theme-current" class="path mono"></span>
+          <span class="spacer"></span>
+          <button id="btn-revert-theme" disabled>还原</button>
+          <button id="btn-save-theme" class="primary" disabled>保存</button>
+        </div>
+        <p id="theme-hint" class="hint"></p>
+        <div id="theme-form"></div>
+      </div>
+    </div>
+  </section>
+
+  <section id="tab-plugin" class="tab-panel">
+    <div class="panel">
+      <div class="links-toolbar">
+        <span class="hint">插件自身配置（部署方式 / SSH / 构建 / 权限 / 功能开关），保存后即时生效</span>
+        <span class="spacer"></span>
+        <button id="btn-refresh-plugin">刷新</button>
+        <button id="btn-save-plugin" class="primary">保存插件配置</button>
+      </div>
+      <p id="plugin-hint" class="hint"></p>
+      <div id="plugin-form" class="site-form"></div>
+    </div>
+  </section>
+
 </main>
 
 <div id="toast"></div>

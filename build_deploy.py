@@ -8,6 +8,7 @@ import posixpath
 import shlex
 import shutil
 import tempfile
+import time
 from typing import Optional
 
 from astrbot.api import logger, AstrBotConfig
@@ -46,8 +47,46 @@ class BuildDeployManager:
         
         # 构建并发锁：allow_build_concurrent 为 false 时串行化构建，避免内存竞争
         self._build_lock = asyncio.Lock()
-        
+        # 构建取消事件：调用 cancel_build() 后 _do_build 中的循环会提前退出
+        self._cancel_event: Optional[asyncio.Event] = None
+        # 最近一次构建日志，供外部读取持久化
+        self._last_build_log: str = ""
+        # 构建日志目录（与插件数据目录同级）
+        self._build_logs_dir = self._init_build_logs_dir()
+
         logger.info(f"[BuildDeployManager] 初始化完成 - 部署模式: {self.deploy_mode.value}")
+
+    def _init_build_logs_dir(self) -> str:
+        try:
+            from astrbot.core.star.star_tools import StarTools
+            data_dir = str(StarTools.get_data_dir())
+            logs_dir = os.path.join(data_dir, "build_logs")
+        except Exception:
+            logs_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_build_logs")
+        os.makedirs(logs_dir, exist_ok=True)
+        return logs_dir
+
+    def cancel_build(self) -> bool:
+        if self._cancel_event is not None and not self._cancel_event.is_set():
+            self._cancel_event.set()
+            logger.info("[BuildDeployManager] 构建取消信号已发送")
+            return True
+        return False
+
+    def _save_build_log(self, log_text: str) -> Optional[str]:
+        try:
+            ts = time.strftime("%Y%m%d_%H%M%S")
+            path = os.path.join(self._build_logs_dir, f"build_{ts}.log")
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(log_text)
+            for old in sorted(
+                [f for f in os.listdir(self._build_logs_dir) if f.endswith(".log")],
+            )[:-20]:
+                os.unlink(os.path.join(self._build_logs_dir, old))
+            return path
+        except Exception as e:
+            logger.warning(f"[BuildDeployManager] 保存构建日志失败: {e}")
+            return None
 
     def _validate_path(self, path: str, config_name: str) -> str:
         """校验路径配置的有效性，防止路径遍历"""
@@ -65,13 +104,13 @@ class BuildDeployManager:
             astro_config = posixpath.join(path, "astro.config.mjs")
             
             matches = 0
-            rc, _, _ = await self.remote_executor.run(f"test -f {package_json}", timeout=5)
+            rc, _, _ = await self.remote_executor.run(f"test -f {shlex.quote(package_json)}", timeout=5)
             if rc == 0:
                 matches += 1
-            rc, _, _ = await self.remote_executor.run(f"test -d {src_content}", timeout=5)
+            rc, _, _ = await self.remote_executor.run(f"test -d {shlex.quote(src_content)}", timeout=5)
             if rc == 0:
                 matches += 1
-            rc, _, _ = await self.remote_executor.run(f"test -f {astro_config}", timeout=5)
+            rc, _, _ = await self.remote_executor.run(f"test -f {shlex.quote(astro_config)}", timeout=5)
             if rc == 0:
                 matches += 1
             return matches >= 2
@@ -90,15 +129,16 @@ class BuildDeployManager:
         return self.blog_root
 
     async def check_environment(self) -> tuple[bool, str]:
-        """检查构建环境（Node.js 和 pnpm）"""
         executor = self._get_executor()
         rc, out, err = await executor.run("node --version")
         if rc != 0:
             return False, f"未安装 Node.js: {err}"
+        node_ver = out.strip()
         rc, out, err = await executor.run("pnpm --version")
         if rc != 0:
             return False, f"未安装 pnpm: {err}"
-        return True, f"环境正常，Node.js: {out.strip()}"
+        pnpm_ver = out.strip()
+        return True, f"环境正常，Node.js: {node_ver}，pnpm: {pnpm_ver}"
 
     async def install_dependencies(self) -> tuple[bool, str]:
         """安装 pnpm 依赖（如果博客目录不存在则自动克隆）"""
@@ -110,7 +150,7 @@ class BuildDeployManager:
         # 先检查博客目录是否存在，不存在则自动克隆
         blog_exists = True
         if self.deploy_mode == DeployMode.REMOTE_BUILD:
-            rc, out, err = await executor.run(f"ls -la {blog_root}", timeout=10)
+            rc, out, err = await executor.run(f"ls -la {shlex.quote(blog_root)}", timeout=10)
             if rc != 0:
                 blog_exists = False
         else:
@@ -123,10 +163,10 @@ class BuildDeployManager:
                 return False, msg
         
         # 检查 package.json 是否存在，不存在则尝试克隆
-        package_json_path = os.path.join(blog_root, "package.json")
+        package_json_path = posixpath.join(blog_root, "package.json") if self.deploy_mode == DeployMode.REMOTE_BUILD else os.path.join(blog_root, "package.json")
         package_exists = True
         if self.deploy_mode == DeployMode.REMOTE_BUILD:
-            rc, out, err = await executor.run(f"ls -la {package_json_path}", timeout=10)
+            rc, out, err = await executor.run(f"ls -la {shlex.quote(package_json_path)}", timeout=10)
             if rc != 0:
                 package_exists = False
         else:
@@ -219,7 +259,7 @@ class BuildDeployManager:
         # 创建父目录
         if self.deploy_mode == DeployMode.REMOTE_BUILD:
             parent_dir = posixpath.dirname(blog_root)
-            await executor.run(f"mkdir -p {parent_dir}", timeout=10)
+            await executor.run(f"mkdir -p {shlex.quote(parent_dir)}", timeout=10)
         else:
             parent_dir = os.path.dirname(blog_root)
             if parent_dir:
@@ -228,7 +268,7 @@ class BuildDeployManager:
         # 检查目标目录是否已存在且非空
         dir_exists = False
         if self.deploy_mode == DeployMode.REMOTE_BUILD:
-            rc, out, err = await executor.run(f"ls -la {blog_root}", timeout=10)
+            rc, out, err = await executor.run(f"ls -la {shlex.quote(blog_root)}", timeout=10)
             dir_exists = rc == 0
         else:
             dir_exists = os.path.isdir(blog_root)
@@ -237,7 +277,7 @@ class BuildDeployManager:
             # 检查目录是否为空
             is_empty = False
             if self.deploy_mode == DeployMode.REMOTE_BUILD:
-                rc, out, err = await executor.run(f"ls -A {blog_root} | wc -l", timeout=10)
+                rc, out, err = await executor.run(f"ls -A {shlex.quote(blog_root)} | wc -l", timeout=10)
                 is_empty = rc == 0 and (out.strip() == "0" or not out.strip())
             else:
                 is_empty = len(os.listdir(blog_root)) == 0
@@ -252,10 +292,10 @@ class BuildDeployManager:
                     return f"[ERROR] 目标目录已存在但不是 Firefly 博客\n目录: {blog_root}\n请手动清理该目录后重试，或在配置中指定其他路径"
         
         # 尝试克隆仓库
-        rc, out, err = await executor.run(f"git clone {repo_url} {blog_root}", timeout=120)
+        rc, out, err = await executor.run(f"git clone {repo_url} {shlex.quote(blog_root)}", timeout=120)
         if rc != 0:
             logger.warning(f"[Build] 主仓库克隆失败，尝试镜像: {err}")
-            rc, out, err = await executor.run(f"git clone {mirror_url} {blog_root}", timeout=120)
+            rc, out, err = await executor.run(f"git clone {mirror_url} {shlex.quote(blog_root)}", timeout=120)
             if rc != 0:
                 return f"[ERROR] 克隆博客仓库失败\n错误信息: {err}\n\n可能的解决方案:\n1. 检查网络连接\n2. 尝试手动克隆: git clone {repo_url} {blog_root}\n3. 检查目标目录是否有写入权限"
         
@@ -284,10 +324,16 @@ class BuildDeployManager:
             command = f'NODE_OPTIONS="--max-old-space-size={memory_limit}" pnpm build'
         else:
             command = "pnpm build"
-        rc, out, err = await executor.run(command, cwd=blog_root, timeout=BUILD_TIMEOUT)
-        if rc != 0:
-            return False, f"构建失败:\n{err}"
-        return True, "构建成功"
+        self._cancel_event = asyncio.Event()
+        try:
+            rc, out, err = await executor.run(command, cwd=blog_root, timeout=BUILD_TIMEOUT)
+            if self._cancel_event.is_set():
+                return False, "构建已被取消"
+            if rc != 0:
+                return False, f"构建失败:\n{err}"
+            return True, "构建成功"
+        finally:
+            self._cancel_event = None
 
     async def deploy(self) -> tuple[bool, str]:
         """部署构建产物到 Web 服务器"""
@@ -300,17 +346,35 @@ class BuildDeployManager:
         return False, "未知的部署模式"
 
     async def _deploy_local(self):
-        """纯本地部署：复制 dist/ 到本地 web 目录"""
+        """纯本地部署：复制 dist/ 到本地 web 目录（原子操作）"""
         local_dist = os.path.join(self.blog_root, "dist")
         if not os.path.exists(local_dist):
             return False, "构建产物不存在，请先构建"
         try:
+            # 原子部署：先复制到临时目录，再 rename 覆盖
+            # 避免 rmtree + copytree 之间崩溃导致空目录
+            staging = self.web_root + ".__staging__"
+            if os.path.exists(staging):
+                shutil.rmtree(staging)
+            shutil.copytree(local_dist, staging)
+            old = self.web_root + ".__old__"
+            if os.path.exists(old):
+                shutil.rmtree(old)
             if os.path.exists(self.web_root):
-                shutil.rmtree(self.web_root)
-            shutil.copytree(local_dist, self.web_root)
+                os.rename(self.web_root, old)
+            os.rename(staging, self.web_root)
+            if os.path.exists(old):
+                shutil.rmtree(old)
             return True, f"已部署到 {self.web_root}"
         except Exception as e:
             logger.error(f"[BuildDeployManager] 本地部署失败: {e}")
+            # 尝试回滚
+            staging = self.web_root + ".__staging__"
+            old = self.web_root + ".__old__"
+            if os.path.exists(staging):
+                shutil.rmtree(staging, ignore_errors=True)
+            if os.path.exists(old) and not os.path.exists(self.web_root):
+                os.rename(old, self.web_root)
             return False, "部署失败，请检查日志获取详细信息"
 
     async def _run_sshpass(self, inner_cmd: str, timeout: int = 300) -> tuple[int, str, str]:
@@ -357,7 +421,7 @@ class BuildDeployManager:
         if auth_type == "key":
             key_path = self.config.get("private_key_path", "")
             if key_path and os.path.exists(key_path):
-                ssh_opts += f" -i {key_path}"
+                ssh_opts += f" -i {shlex.quote(key_path)}"
             rsync_cmd = (
                 f'rsync -avz --delete '
                 f'-e "ssh {ssh_opts}" '
@@ -404,19 +468,19 @@ class BuildDeployManager:
         if auth_type == "key":
             key_path = self.config.get("private_key_path", "")
             if key_path and os.path.exists(key_path):
-                ssh_opts += f" -i {key_path}"
+                ssh_opts += f" -i {shlex.quote(key_path)}"
             scp_cmd = (
                 f'scp -r {ssh_opts} '
-                f'{shlex.quote(f"{local_dist}/*")} {shlex.quote(f"{username}@{hostname}:{self.remote_web_root}/")}'
+                f'{shlex.quote(local_dist)}/* {shlex.quote(f"{username}@{hostname}:{self.remote_web_root}/")}'
             )
         else:
             password = self.config.get("password", "")
             if not password:
                 return False, "密码认证模式下未配置密码"
-            await self.remote_executor.run(f"rm -rf {self.remote_web_root}/*")
+            await self.remote_executor.run(f"rm -rf {shlex.quote(self.remote_web_root)}/*")
             scp_cmd = (
                 f'scp -r {ssh_opts} '
-                f'{shlex.quote(f"{local_dist}/*")} {shlex.quote(f"{username}@{hostname}:{self.remote_web_root}/")}'
+                f'{shlex.quote(local_dist)}/* {shlex.quote(f"{username}@{hostname}:{self.remote_web_root}/")}'
             )
 
         if auth_type == "password":
@@ -445,10 +509,15 @@ class BuildDeployManager:
             )
 
         rc, out, err = await self.remote_executor.run(
-            f"rm -rf {self.remote_web_root}/* && cp -r {self.remote_blog_root}/dist/* {self.remote_web_root}/",
+            f"rm -rf {shlex.quote(self.remote_web_root + '.__old__')} "
+            f"&& ([ -d {shlex.quote(self.remote_web_root)} ] && mv {shlex.quote(self.remote_web_root)} {shlex.quote(self.remote_web_root + '.__old__')} || true) "
+            f"&& mkdir -p {shlex.quote(self.remote_web_root)} "
+            f"&& cp -r {shlex.quote(self.remote_blog_root + '/dist')}/* {shlex.quote(self.remote_web_root)}/ "
+            f"&& rm -rf {shlex.quote(self.remote_web_root + '.__old__')}",
             timeout=60,
         )
         if rc != 0:
+            logger.error(f"[BuildDeployManager] 远端部署失败: {err}")
             return False, f"远端部署失败:\n{err}"
         return True, f"已部署到远端 {self.remote_web_root}"
 
@@ -457,7 +526,7 @@ class BuildDeployManager:
         blog_root = self._get_blog_root()
         if self.deploy_mode == DeployMode.REMOTE_BUILD and self.remote_executor:
             node_modules_path = posixpath.join(blog_root, "node_modules")
-            rc, _, _ = await self.remote_executor.run(f"test -d {node_modules_path}")
+            rc, _, _ = await self.remote_executor.run(f"test -d {shlex.quote(node_modules_path)}")
             return rc == 0
         else:
             node_modules_path = os.path.join(blog_root, "node_modules")

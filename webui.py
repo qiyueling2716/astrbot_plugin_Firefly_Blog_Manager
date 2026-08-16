@@ -15,6 +15,7 @@ context.register_web_api() 注册后端接口，由 Dashboard 以受限 iframe
 from __future__ import annotations
 
 import asyncio
+import base64
 import functools
 import json
 import os
@@ -33,16 +34,44 @@ from .constants import (
     EXTERNAL_CONFIG_FILES,
     PLUGIN_NAME,
     PLUGIN_VERSION,
+    SITE_INFO_FIELDS,
+    THEME_ENUMS,
+    THEME_GROUPS,
+    THEME_MODULE_META,
 )
 from .filesystem import LocalFileSystem, RemoteFileSystem
 from .models import DeployMode
+from .ts_parser import (
+    clean_raw,
+    collect_raw_paths,
+    deep_merge,
+    extract_types_enums,
+    leaf_fields,
+    parse_friend_links,
+    parse_ts_config_object,
+    parse_ts_config_objects,
+    rebuild_friends_config,
+    rebuild_ts_array_export,
+    rebuild_ts_config,
+    strip_paths,
+)
 
-MAX_FILE_READ_BYTES = 2 * 1024 * 1024  # 网页预览文件大小上限（2MB）
+MAX_FILE_READ_BYTES = 2 * 1024 * 1024
 
 IMAGE_PREVIEW_EXTS = (
     ".png", ".jpg", ".jpeg", ".gif", ".webp", ".avif", ".ico", ".bmp",
 )
-IMAGE_PREVIEW_MAX_BYTES = 8 * 1024 * 1024  # 图片预览上限（8MB）
+IMAGE_PREVIEW_MAX_BYTES = 8 * 1024 * 1024
+
+UPLOAD_ALLOWED_EXTS = (
+    ".png", ".jpg", ".jpeg", ".gif", ".webp", ".avif", ".ico", ".bmp",
+    ".svg", ".pdf",
+    ".mp3", ".mp4", ".wav", ".ogg", ".flac",
+    ".md", ".txt", ".json", ".yaml", ".yml", ".toml", ".xml",
+    ".js", ".ts", ".jsx", ".tsx", ".css", ".scss",
+    ".woff", ".woff2", ".ttf", ".otf", ".eot",
+    ".zip", ".tar", ".gz",
+)
 
 WEB_ROUTES = [
     ("status", "GET", "博客状态概览"),
@@ -62,524 +91,17 @@ WEB_ROUTES = [
     ("config-file", "GET", "读取配置文件（结构化）"),
     ("config-file", "POST", "保存配置文件（结构化）"),
     ("wallpaper", "GET", "随机壁纸（桌面端/移动端）"),
+    ("site-info", "GET", "站点信息（siteConfig.ts 核心字段 + friends.mdx 站点信息）"),
+    ("site-info", "POST", "保存站点信息"),
+    ("theme-files", "GET", "列出主题配置模块（src/config 全部可编辑配置）"),
+    ("theme-file", "GET", "读取主题配置模块数据（含只读字段与枚举）"),
+    ("theme-file", "POST", "保存主题配置模块"),
+    ("build-deploy", "POST", "启动构建/部署任务（both|build|deploy）"),
+    ("build-deploy", "GET", "查询构建/部署任务状态与日志"),
+    ("plugin-config", "GET", "获取插件配置（含 schema 元信息，敏感字段不回显）"),
+    ("plugin-config", "POST", "保存插件配置（敏感字段留空则不修改）"),
 ]
 
-
-# ============================================================================
-# TypeScript 解析工具（friendsConfig.ts）
-# ============================================================================
-
-def _strip_ts_comments(text: str) -> str:
-    """移除 TS 代码中的 // 和 /* */ 注释（保留字符串字面量内的内容）"""
-    out = []
-    i, n = 0, len(text)
-    in_str = False
-    while i < n:
-        ch = text[i]
-        if in_str:
-            out.append(ch)
-            if ch == "\\" and i + 1 < n:
-                out.append(text[i + 1])
-                i += 2
-                continue
-            if ch == '"':
-                in_str = False
-            i += 1
-            continue
-        if ch == '"':
-            in_str = True
-            out.append(ch)
-            i += 1
-            continue
-        if ch == "/" and i + 1 < n:
-            nxt = text[i + 1]
-            if nxt == "/":
-                while i < n and text[i] != "\n":
-                    i += 1
-                continue
-            if nxt == "*":
-                i += 2
-                while i + 1 < n and not (text[i] == "*" and text[i + 1] == "/"):
-                    i += 1
-                i = min(i + 2, n)
-                continue
-        out.append(ch)
-        i += 1
-    return "".join(out)
-
-
-def _find_matching_bracket(text: str, open_idx: int, open_ch: str, close_ch: str) -> int:
-    """从 open_idx 开始查找与 open_ch 匹配的 close_ch 位置（字符串与注释感知）"""
-    depth = 0
-    i, n = open_idx, len(text)
-    while i < n:
-        ch = text[i]
-        if ch in "\"'":
-            quote = ch
-            i += 1
-            while i < n:
-                if text[i] == "\\":
-                    i += 2
-                    continue
-                if text[i] == quote:
-                    break
-                i += 1
-            i += 1
-            continue
-        if ch == "/" and i + 1 < n:
-            if text[i + 1] == "/":
-                while i < n and text[i] != "\n":
-                    i += 1
-                continue
-            if text[i + 1] == "*":
-                i += 2
-                while i + 1 < n and not (text[i] == "*" and text[i + 1] == "/"):
-                    i += 1
-                i = min(i + 2, n)
-                continue
-        if ch == open_ch:
-            depth += 1
-        elif ch == close_ch:
-            depth -= 1
-            if depth == 0:
-                return i
-        i += 1
-    return -1
-
-
-def _split_top_level(text: str) -> list[str]:
-    """按顶层逗号拆分（字符串与括号感知），返回去除首尾空白的分段"""
-    parts = []
-    start = 0
-    depth = 0
-    i, n = 0, len(text)
-    while i < n:
-        ch = text[i]
-        if ch in "\"'":
-            quote = ch
-            i += 1
-            while i < n:
-                if text[i] == "\\":
-                    i += 2
-                    continue
-                if text[i] == quote:
-                    break
-                i += 1
-            i += 1
-            continue
-        if ch in "{[(":
-            depth += 1
-        elif ch in "}])":
-            depth = max(0, depth - 1)
-        elif ch == "," and depth == 0:
-            parts.append(text[start:i].strip())
-            start = i + 1
-        i += 1
-    parts.append(text[start:].strip())
-    return [p for p in parts if p]
-
-
-def _decode_js_value(raw: str):
-    """解析 JS 字面量值：字符串、数字、布尔、字符串数组、null
-
-    无法识别的值原样返回字符串（重建时逐字写回）。
-    """
-    value = raw.strip()
-    if not value:
-        return ""
-    if value.startswith('"'):
-        try:
-            return json.loads(value)
-        except (ValueError, TypeError):
-            return value
-    if value.startswith("["):
-        inner = value[1:].rsplit("]", 1)[0] if value.endswith("]") else value[1:]
-        items = []
-        for part in _split_top_level(inner):
-            item = part.strip()
-            if item.startswith('"'):
-                try:
-                    items.append(json.loads(item))
-                except (ValueError, TypeError):
-                    items.append(item)
-            else:
-                items.append(item)
-        return items
-    if value == "true":
-        return True
-    if value == "false":
-        return False
-    if value == "null":
-        return None
-    try:
-        return int(value)
-    except ValueError:
-        pass
-    try:
-        return float(value)
-    except ValueError:
-        return value
-
-
-def parse_friend_links(content: str) -> tuple[list[dict], Optional[str]]:
-    """解析 friendsConfig.ts 中的 friendsConfig 数组
-
-    Returns:
-        (友链列表, 错误信息)；解析成功时错误信息为 None
-    """
-    text = _strip_ts_comments(content)
-    anchor = text.find("export const friendsConfig")
-    if anchor == -1:
-        anchor = text.find("friendsConfig")
-    if anchor == -1:
-        return [], "未找到 friendsConfig 定义"
-    eq_idx = text.find("=", anchor)
-    if eq_idx == -1:
-        return [], "未找到 friendsConfig 赋值"
-    open_idx = text.find("[", eq_idx)
-    if open_idx == -1:
-        return [], "未找到 friendsConfig 数组"
-    close_idx = _find_matching_bracket(text, open_idx, "[", "]")
-    if close_idx == -1:
-        return [], "friendsConfig 数组未闭合"
-
-    array_body = text[open_idx + 1 : close_idx]
-    links = []
-    for chunk in _split_top_level(array_body):
-        chunk = chunk.strip()
-        if not chunk:
-            continue
-        if not chunk.startswith("{"):
-            continue
-        link = {}
-        body = chunk[1:].rsplit("}", 1)[0] if chunk.endswith("}") else chunk[1:]
-        for pair in _split_top_level(body):
-            colon = pair.find(":")
-            if colon == -1:
-                continue
-            key = pair[:colon].strip().strip('"').strip("'")
-            raw_value = pair[colon + 1 :]
-            link[key] = _decode_js_value(raw_value)
-        links.append(link)
-    return links, None
-
-
-def _js_repr(value) -> str:
-    """将解析后的值序列化为 JS 字面量"""
-    if isinstance(value, bool):
-        return "true" if value else "false"
-    if value is None:
-        return "null"
-    if isinstance(value, (int, float)):
-        return str(value)
-    if isinstance(value, list):
-        return "[" + ", ".join(_js_repr(v) for v in value) + "]"
-    if isinstance(value, dict) and "__raw__" in value:
-        return value["__raw__"]
-    return json.dumps(str(value), ensure_ascii=False)
-
-
-_KNOWN_LINK_KEYS = ["title", "imgurl", "desc", "siteurl", "tags", "weight", "enabled"]
-
-
-def rebuild_friends_config(content: str, links: list[dict]) -> str:
-    """根据友链列表重建 friendsConfig 数组（保留文件其余部分）"""
-    text = _strip_ts_comments(content)
-    anchor = text.find("export const friendsConfig")
-    if anchor == -1:
-        anchor = text.find("friendsConfig")
-    if anchor == -1:
-        raise ValueError("未找到 friendsConfig 定义")
-    # 在注释剥离前定位同一锚点在原文件中的位置，保证切片偏移正确
-    raw_anchor = content.find("export const friendsConfig")
-    if raw_anchor == -1:
-        raw_anchor = content.find("friendsConfig")
-    eq_idx = content.find("=", raw_anchor)
-    if eq_idx == -1:
-        raise ValueError("未找到 friendsConfig 赋值")
-    open_idx = content.find("[", eq_idx)
-    if open_idx == -1:
-        raise ValueError("未找到 friendsConfig 数组")
-    close_idx = _find_matching_bracket(content, open_idx, "[", "]")
-    if close_idx == -1:
-        raise ValueError("friendsConfig 数组未闭合")
-
-    lines = ["["]
-    for link in links:
-        lines.append("\t{")
-        for key in _KNOWN_LINK_KEYS:
-            if key in link:
-                lines.append(f"\t\t{key}: {_js_repr(link[key])},")
-        for key, value in link.items():
-            if key not in _KNOWN_LINK_KEYS:
-                lines.append(f"\t\t{key}: {_js_repr(value)},")
-        lines.append("\t},")
-    lines.append("]")
-    block = "\n".join(lines)
-
-    return content[:open_idx] + block + content[close_idx + 1 :]
-
-
-# ============================================================================
-# 通用 TS 配置对象解析 / 重建（siteConfig.ts 等纯对象配置文件）
-# ============================================================================
-
-def _decode_ts_single_quote(s: str) -> Optional[str]:
-    """解码单引号字符串（含常见转义），无法安全解码时返回 None"""
-    if len(s) < 2 or s[-1] != "'":
-        return None
-    inner = s[1:-1]
-    out = []
-    i, n = 0, len(inner)
-    escapes = {"n": "\n", "t": "\t", "r": "\r", "\\": "\\", "'": "'", '"': '"'}
-    while i < n:
-        ch = inner[i]
-        if ch == "\\" and i + 1 < n:
-            nxt = inner[i + 1]
-            out.append(escapes.get(nxt, "\\" + nxt))
-            i += 2
-            continue
-        if ch == "'":
-            return None
-        out.append(ch)
-        i += 1
-    return "".join(out)
-
-
-def _parse_ts_value(raw: str):
-    """递归解析 TS 值（字符串/数字/布尔/null/undefined/对象/数组）
-
-    无法识别的值（枚举引用、函数调用、模板字符串等）以
-    {"__raw__": 原文} 标记，重建时逐字写回。
-    """
-    value = raw.strip()
-    if not value:
-        return ""
-    if value.startswith('"'):
-        try:
-            return json.loads(value)
-        except (ValueError, TypeError):
-            return {"__raw__": value}
-    if value.startswith("'"):
-        decoded = _decode_ts_single_quote(value)
-        if decoded is not None:
-            return decoded
-        return {"__raw__": value}
-    if value.startswith("{"):
-        close_idx = _find_matching_bracket(value, 0, "{", "}")
-        if close_idx == -1:
-            return {"__raw__": value}
-        return _parse_ts_object_body(value[1:close_idx])
-    if value.startswith("["):
-        close_idx = _find_matching_bracket(value, 0, "[", "]")
-        if close_idx == -1:
-            return {"__raw__": value}
-        items = []
-        for part in _split_top_level(value[1:close_idx]):
-            if part.strip():
-                items.append(_parse_ts_value(part))
-        return items
-    if value == "true":
-        return True
-    if value == "false":
-        return False
-    if value in ("null", "undefined"):
-        return None
-    try:
-        return int(value)
-    except ValueError:
-        pass
-    try:
-        return float(value)
-    except ValueError:
-        return {"__raw__": value}
-
-
-def _parse_ts_object_body(body: str) -> dict:
-    """解析对象字面量内部（不含外层大括号）为 dict"""
-    data = {}
-    for pair in _split_top_level(body):
-        colon = pair.find(":")
-        if colon == -1:
-            continue
-        key = pair[:colon].strip().strip('"').strip("'")
-        if not key:
-            continue
-        data[key] = _parse_ts_value(pair[colon + 1 :])
-    return data
-
-
-def parse_ts_config_objects(content: str) -> list[dict]:
-    """解析文件中所有纯字面量导出（对象或数组）
-
-    每个结果: {"name": 导出名, "kind": "object"|"array", "data": 解析后的值}。
-    仅支持 `export const name[: Type] = { ... }` / `= [ ... ]` 形式；
-    含函数调用/动态逻辑（如 navBarConfig.ts）或非字面量导出的被跳过。
-    """
-    text = _strip_ts_comments(content)
-    results = []
-    for m in re.finditer(r"export\s+const\s+([A-Za-z_$][\w$]*)", text):
-        name = m.group(1)
-        eq_idx = text.find("=", m.end())
-        if eq_idx == -1:
-            continue
-        rest = text[eq_idx + 1 :].lstrip()
-        if rest.startswith("["):
-            data = _parse_ts_value(rest)
-            if isinstance(data, list):
-                results.append({"name": name, "kind": "array", "data": data})
-        elif rest.startswith("{"):
-            open_idx = text.find("{", eq_idx)
-            if open_idx == -1:
-                continue
-            between_end = text[eq_idx + 1 : open_idx].strip()
-            if between_end and not between_end.startswith(":"):
-                continue
-            close_idx = _find_matching_bracket(text, open_idx, "{", "}")
-            if close_idx == -1:
-                continue
-            data = _parse_ts_object_body(text[open_idx + 1 : close_idx])
-            if data is not None:
-                results.append({"name": name, "kind": "object", "data": data})
-    return results
-
-
-def parse_ts_config_object(content: str) -> Optional[dict]:
-    """解析文件中第一个纯对象导出的 TS 配置
-
-    支持 `export const name: Type = { ... }`（含类型标注）与 `export const name = {...}`
-    形式的纯对象字面量；多个导出时返回第一个可解析为对象字面量的。
-    值含函数调用/动态逻辑（如 navBarConfig.ts）或非对象导出时返回 None。
-
-    Returns:
-        {"name": 导出名, "data": 解析后的对象} 或 None
-    """
-    for exp in parse_ts_config_objects(content):
-        if exp["kind"] == "object":
-            return {"name": exp["name"], "data": exp["data"]}
-    return None
-
-
-def _rebuild_ts_value(value, level: int) -> str:
-    """将解析后的配置值序列化为 TS 字面量（tab 缩进）"""
-    indent = "\t" * level
-    child_indent = "\t" * (level + 1)
-    if isinstance(value, dict):
-        if "__raw__" in value:
-            return str(value["__raw__"])
-        if not value:
-            return "{}"
-        lines = ["{"]
-        for key, val in value.items():
-            lines.append(f"{child_indent}{key}: {_rebuild_ts_value(val, level + 1)},")
-        lines.append(indent + "}")
-        return "\n".join(lines)
-    if isinstance(value, list):
-        if not value:
-            return "[]"
-        if any(isinstance(v, (dict, list)) for v in value):
-            lines = ["["]
-            for item in value:
-                lines.append(child_indent + _rebuild_ts_value(item, level + 1) + ",")
-            lines.append(indent + "]")
-            return "\n".join(lines)
-        return "[" + ", ".join(_js_repr(v) for v in value) + "]"
-    return _js_repr(value)
-
-
-def _find_char_skip_comments(text: str, start: int, target: str) -> int:
-    """从 start 起查找第一个 target 字符（跳过字符串与注释）"""
-    i, n = start, len(text)
-    in_str = False
-    while i < n:
-        ch = text[i]
-        if in_str:
-            if ch == "\\":
-                i += 2
-                continue
-            if ch == '"':
-                in_str = False
-            i += 1
-            continue
-        if ch == '"':
-            in_str = True
-            i += 1
-            continue
-        if ch == "/" and i + 1 < n:
-            if text[i + 1] == "/":
-                while i < n and text[i] != "\n":
-                    i += 1
-                continue
-            if text[i + 1] == "*":
-                i += 2
-                while i + 1 < n and not (text[i] == "*" and text[i + 1] == "/"):
-                    i += 1
-                i = min(i + 2, n)
-                continue
-        if ch == target:
-            return i
-        i += 1
-    return -1
-
-
-def rebuild_ts_config(content: str, export_name: str, data: dict) -> str:
-    """按解析后的对象重建配置文件中的对应导出块（保留文件其余部分）"""
-    raw_m = re.search(r"export\s+const\s+" + re.escape(export_name) + r"\b", content)
-    if not raw_m:
-        raise ValueError(f"未找到 {export_name} 定义")
-    eq_idx = _find_char_skip_comments(content, raw_m.end(), "=")
-    if eq_idx == -1:
-        raise ValueError(f"未找到 {export_name} 赋值")
-    open_idx = _find_char_skip_comments(content, eq_idx + 1, "{")
-    if open_idx == -1:
-        raise ValueError(f"未找到 {export_name} 对象")
-    between = content[eq_idx + 1 : open_idx].strip()
-    if between and not between.startswith(":"):
-        raise ValueError(f"{export_name} 不是纯对象配置")
-    close_idx = _find_matching_bracket(content, open_idx, "{", "}")
-    if close_idx == -1:
-        raise ValueError(f"{export_name} 对象未闭合")
-    block = _rebuild_ts_value(data, 0)
-    return content[:open_idx] + block + content[close_idx + 1 :]
-
-
-def rebuild_ts_array_export(content: str, export_name: str, items: list) -> str:
-    """替换 `export const name[: Type] = [...]` 的数组字面量（保留文件其余部分）"""
-    raw_m = re.search(r"export\s+const\s+" + re.escape(export_name) + r"\b", content)
-    if not raw_m:
-        raise ValueError(f"未找到 {export_name} 定义")
-    eq_idx = _find_char_skip_comments(content, raw_m.end(), "=")
-    if eq_idx == -1:
-        raise ValueError(f"未找到 {export_name} 赋值")
-    open_idx = _find_char_skip_comments(content, eq_idx + 1, "[")
-    if open_idx == -1:
-        raise ValueError(f"未找到 {export_name} 数组")
-    between = content[eq_idx + 1 : open_idx].strip()
-    if between and not between.startswith(":"):
-        raise ValueError(f"{export_name} 不是纯数组导出")
-    close_idx = _find_matching_bracket(content, open_idx, "[", "]")
-    if close_idx == -1:
-        raise ValueError(f"{export_name} 数组未闭合")
-    block = _rebuild_ts_array(items, 0)
-    return content[:open_idx] + block + content[close_idx + 1 :]
-
-
-def _rebuild_ts_array(items: list, level: int = 0) -> str:
-    """将数组序列化为 TS 数组字面量（tab 缩进）"""
-    indent = "\t" * level
-    child_indent = "\t" * (level + 1)
-    if not items:
-        return "[]"
-    lines = ["["]
-    for item in items:
-        lines.append(child_indent + _rebuild_ts_value(item, level + 1) + ",")
-    lines.append(indent + "]")
-    return "\n".join(lines)
-
-
-# ============================================================================
-# WebUI 后端
-# ============================================================================
 
 def _web_safe(view):
     """Web handler 异常兜底：记录完整堆栈，并把真实错误返回给页面"""
@@ -590,13 +112,38 @@ def _web_safe(view):
             return await view(*args, **kwargs)
         except Exception as e:
             logger.exception(f"[Firefly] Web API 处理异常 ({view.__name__}): {e}")
-            return error_response(f"后端处理异常: {type(e).__name__}: {e}")
+            return error_response("后端处理异常，请查看日志")
 
     return wrapped
 
 
 class WebUIMixin:
     """博客管理 WebUI 后端接口（由 FireflyBlogManager 混入）"""
+
+    _CONFIG_BACKUPS_MAX = 10
+
+    def _config_backups_dir(self) -> str:
+        try:
+            from astrbot.core.star.star_tools import StarTools
+            data_dir = str(StarTools.get_data_dir())
+            return os.path.join(data_dir, "config_backups")
+        except Exception:
+            return os.path.join(self.plugin_dir, "_config_backups")
+
+    def _cleanup_old_backups(self, bak_dir: str, base_name: str) -> None:
+        try:
+            prefix = base_name + "."
+            files = sorted(
+                [f for f in os.listdir(bak_dir) if f.startswith(prefix) and f.endswith(".bak")],
+                reverse=True,
+            )
+            for old in files[self._CONFIG_BACKUPS_MAX:]:
+                try:
+                    os.remove(os.path.join(bak_dir, old))
+                except OSError:
+                    pass
+        except Exception:
+            pass
 
     def register_web_apis(self) -> None:
         """注册所有 Dashboard 页面 API"""
@@ -625,6 +172,11 @@ class WebUIMixin:
             "config-files": self._web_config_files,
             "config-file": self._web_config_file,
             "wallpaper": self._web_wallpaper,
+            "site-info": self._web_site_info,
+            "theme-files": self._web_theme_files,
+            "theme-file": self._web_theme_file,
+            "build-deploy": self._web_build_deploy,
+            "plugin-config": self._web_plugin_config,
         }
 
     # ------------------------------------------------------------------
@@ -635,7 +187,7 @@ class WebUIMixin:
         """将网页传入的相对路径安全解析到 src 根目录内
 
         Raises:
-            ValueError: 路径非法（穿越、绝对路径等）
+            ValueError: 路径非法（穿越、绝对路径、symlink 越界等）
         """
         rel = (rel_path or "").strip().replace("\\", "/").lstrip("/")
         parts = [p for p in rel.split("/") if p not in ("", ".")]
@@ -644,8 +196,11 @@ class WebUIMixin:
         src_root = self.src_root
         if isinstance(self.fs, LocalFileSystem):
             full = os.path.normpath(os.path.join(src_root, *parts))
-            if os.path.commonpath([full, os.path.normpath(src_root)]) != os.path.normpath(src_root):
-                raise ValueError("路径越界")
+            # 用 realpath 解析 symlink，防止 symlink 指向 src 外
+            real_full = os.path.realpath(full)
+            real_root = os.path.realpath(src_root)
+            if not (real_full == real_root or real_full.startswith(real_root.rstrip("/") + "/")):
+                raise ValueError("路径越界（symlink 解析后超出 src 目录）")
             return full
         full = posixpath.normpath(posixpath.join(src_root, *parts))
         norm_root = posixpath.normpath(src_root)
@@ -753,12 +308,16 @@ class WebUIMixin:
 
         memory = self._check_memory_status()
 
+        display_blog_root = blog_root
+        if deploy_mode == DeployMode.REMOTE_BUILD:
+            display_blog_root = "[remote]"
+
         return json_response({
             "status": "ok",
             "data": {
                 "version": PLUGIN_VERSION,
                 "deploy_mode": deploy_mode.value,
-                "blog_root": blog_root,
+                "blog_root": display_blog_root,
                 "blog_root_source": source,
                 "blog_root_exists": bool(src_root) and os.path.isdir(src_root),
                 "firefly_detected": firefly_detected,
@@ -804,6 +363,89 @@ class WebUIMixin:
         return await self._web_status()
 
     # ------------------------------------------------------------------
+    # 插件配置（部署/SSH/构建/功能开关，schema 驱动表单）
+    # ------------------------------------------------------------------
+
+    _PLUGIN_CONFIG_SECRET_FIELDS = {"password"}
+
+    def _load_config_schema(self) -> dict:
+        schema_path = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "_conf_schema.json"
+        )
+        try:
+            with open(schema_path, encoding="utf-8-sig") as f:
+                schema = json.load(f)
+            return schema if isinstance(schema, dict) else {}
+        except Exception as e:
+            logger.error(f"[Firefly] 读取 _conf_schema.json 失败: {e}")
+            return {}
+
+    @staticmethod
+    def _coerce_config_value(raw, meta: dict):
+        t = meta.get("type")
+        if t == "bool":
+            if isinstance(raw, bool):
+                return raw
+            return str(raw).strip().lower() in ("true", "1", "yes", "on")
+        if t == "int":
+            return int(raw)
+        if t == "float":
+            return float(raw)
+        if t == "list":
+            if isinstance(raw, list):
+                return raw
+            return [x.strip() for x in str(raw).split(",") if x.strip()]
+        return str(raw)
+
+    async def _web_plugin_config(self):
+        if request.method == "GET":
+            return await self._web_plugin_config_get()
+        return await self._web_plugin_config_save()
+
+    async def _web_plugin_config_get(self):
+        schema = self._load_config_schema()
+        values = {}
+        for name, meta in schema.items():
+            value = self.config.get(name)
+            if value is None:
+                default = meta.get("default")
+                if default is None and meta.get("type") == "string":
+                    default = ""
+                value = default
+            if name in self._PLUGIN_CONFIG_SECRET_FIELDS and value:
+                value = ""
+            values[name] = value
+        return json_response({"status": "ok", "data": {"schema": schema, "values": values}})
+
+    async def _web_plugin_config_save(self):
+        data = await request.json(default={})
+        payload = data.get("config")
+        if not isinstance(payload, dict):
+            return error_response("无效的请求数据")
+        schema = self._load_config_schema()
+        errors = []
+        for name, raw in payload.items():
+            if name not in schema:
+                continue
+            if name in self._PLUGIN_CONFIG_SECRET_FIELDS and raw in ("", None):
+                continue
+            try:
+                value = self._coerce_config_value(raw, schema[name])
+            except (TypeError, ValueError):
+                errors.append(f"{name} 值无效")
+                continue
+            self.config[name] = value
+        if errors:
+            return error_response("配置无效: " + "; ".join(errors))
+        try:
+            await self.config.save_config_async()
+        except Exception as e:
+            logger.error(f"[Firefly] 保存插件配置失败: {e}")
+            return error_response(f"保存插件配置失败: {e}")
+        self._init_components()
+        return json_response({"status": "ok", "data": {"saved": list(payload.keys())}})
+
+    # ------------------------------------------------------------------
     # 文件管理
     # ------------------------------------------------------------------
 
@@ -821,7 +463,7 @@ class WebUIMixin:
             return error_response(f"不是目录: {rel_path or 'src'}")
 
         entries = await self._list_dir_entries(full)
-        return json_response({"status": "ok", "data": {"path": rel_path or "", "entries": entries}})
+        return json_response({"status": "ok", "data": {"path": rel_path or "", "entries": entries, "total": len(entries)}})
 
     async def _web_file(self):
         if request.method == "GET":
@@ -848,7 +490,6 @@ class WebUIMixin:
                     raw = f.read()
             except OSError:
                 return error_response(f"无法读取图片: {rel_path}")
-            import base64
             mime = "image/svg+xml" if lower.endswith(".svg") else "image/" + lower.rsplit(".", 1)[-1]
             data_url = f"data:{mime};base64," + base64.b64encode(raw).decode("ascii")
             return json_response({
@@ -867,9 +508,15 @@ class WebUIMixin:
         content = await self.fs.read_file(full)
         if content is None:
             return error_response(f"无法读取文件: {rel_path}")
+        has_script = bool(re.search(r"<script[\s>]", content, re.IGNORECASE))
         return json_response({
             "status": "ok",
-            "data": {"path": rel_path or "", "content": content, "binary": False},
+            "data": {
+                "path": rel_path or "",
+                "content": content,
+                "binary": False,
+                "xss_warning": has_script,
+            },
         })
 
     async def _write_file_handler(self):
@@ -884,6 +531,8 @@ class WebUIMixin:
             return error_response(f"非法路径: {e}")
         if full.rstrip("/").endswith((".png", ".jpg", ".jpeg", ".gif", ".webp", ".avif", ".ico", ".bmp", ".woff", ".woff2", ".ttf")):
             return error_response("二进制资源请通过上传功能更新")
+        if not await self.fs.exists(full):
+            return error_response(f"文件不存在: {rel_path}，请先创建文件或通过上传功能上传")
         ok = await self.fs.write_file(full, content)
         if not ok:
             return error_response(f"写入失败: {rel_path}")
@@ -892,14 +541,18 @@ class WebUIMixin:
     async def _web_file_delete(self):
         data = await request.json(default={})
         rel_path = str(data.get("path") or "")
+        confirm = data.get("confirm", False)
         if not rel_path:
             return error_response("缺少路径")
+        if not confirm:
+            return error_response("缺少确认参数 confirm=true，重复请求以确认删除")
         try:
             full = self._resolve_src_path(rel_path)
         except ValueError as e:
             return error_response(f"非法路径: {e}")
         if full == self.src_root:
             return error_response("不允许删除 src 根目录")
+        logger.info(f"[Firefly] 删除文件: {rel_path}")
         ok = await self.fs.delete_file(full)
         if not ok:
             return error_response(f"删除失败: {rel_path}")
@@ -913,6 +566,8 @@ class WebUIMixin:
 
         raw_name = (upload_file.filename or "upload.bin").replace("\\", "/")
         filename = os.path.basename(raw_name) or "upload.bin"
+        if not any(filename.lower().endswith(ext) for ext in UPLOAD_ALLOWED_EXTS):
+            return error_response(f"不允许上传该类型文件（{os.path.splitext(filename)[1] or '未知'}），仅支持常见图片/媒体/文本/字体/压缩格式")
         try:
             full_dir = self._resolve_src_path(dir or "")
             full_target = self._resolve_src_path(posixpath.join(dir or "", filename))
@@ -1031,6 +686,16 @@ class WebUIMixin:
                             "count": len(exp["data"]),
                         }
                     )
+                elif exp["name"] == "site" and name.lower() == "friends.mdx":
+                    # friends.mdx 中的站点信息对象（含申请邮箱）整体可编辑
+                    targets.append(
+                        {
+                            "kind": "object",
+                            "name": exp["name"],
+                            "field": exp["name"],
+                            "count": len(exp["data"]),
+                        }
+                    )
                 else:
                     for k, v in exp["data"].items():
                         if isinstance(v, list):
@@ -1047,7 +712,7 @@ class WebUIMixin:
         return json_response({"status": "ok", "data": {"files": files}})
 
     def _find_external_target(self, content: str, kind: str, name: str, field: str):
-        """在文件中定位对外展示编辑目标，返回数组值或 None"""
+        """在文件中定位对外展示编辑目标，返回数组值或整体对象（field==name 时）或 None"""
         for exp in parse_ts_config_objects(content):
             if kind == "array" and exp["kind"] == "array" and exp["name"] == name:
                 return exp["data"]
@@ -1055,9 +720,11 @@ class WebUIMixin:
                 kind == "object"
                 and exp["kind"] == "object"
                 and exp["name"] == name
-                and isinstance(exp["data"].get(field), list)
             ):
-                return exp["data"][field]
+                if field == name:
+                    return exp["data"]
+                if isinstance(exp["data"].get(field), list):
+                    return exp["data"][field]
         return None
 
     async def _web_external_items(self):
@@ -1088,7 +755,7 @@ class WebUIMixin:
         exp_name = str(data.get("name") or "")
         field = str(data.get("field") or "")
         items = data.get("items")
-        if not isinstance(items, list):
+        if not isinstance(items, (list, dict)):
             return error_response("无效的条目数据")
         full, err = self._resolve_config_file(name)
         if err:
@@ -1097,10 +764,15 @@ class WebUIMixin:
         if content is None:
             return error_response(f"无法读取 {name}")
         if self._find_external_target(content, kind, exp_name, field) is None:
-            return error_response(f"{name} 中不存在可编辑的列表目标")
+            return error_response(f"{name} 中不存在可编辑的目标")
         try:
             if kind == "array":
                 rebuilt = rebuild_ts_array_export(content, exp_name, items)
+            elif field == exp_name:
+                # 整体对象编辑（如 friends.mdx 的站点信息 site）
+                if not isinstance(items, dict):
+                    return error_response("对象目标需要完整的对象数据")
+                rebuilt = rebuild_ts_config(content, exp_name, items)
             else:
                 payload = None
                 for exp in parse_ts_config_objects(content):
@@ -1208,8 +880,6 @@ class WebUIMixin:
         except OSError:
             return error_response(f"无法读取壁纸: {chosen}")
 
-        import base64
-
         ext = chosen.lower().rsplit(".", 1)[-1]
         mime = "image/svg+xml" if ext == "svg" else "image/" + ext
         data_url = f"data:{mime};base64," + base64.b64encode(raw).decode("ascii")
@@ -1224,13 +894,389 @@ class WebUIMixin:
         })
 
     # ------------------------------------------------------------------
+    # 站点信息（siteConfig.ts 核心字段 + friends.mdx 站点信息）
+    # ------------------------------------------------------------------
+
+    async def _web_site_info(self):
+        if request.method == "GET":
+            return await self._web_site_info_get()
+        return await self._web_site_info_save()
+
+    async def _web_site_info_get(self):
+        result = {"site_config": None, "site": None}
+
+        full, err = self._resolve_config_file("siteConfig.ts")
+        if not err and await self.fs.exists(full):
+            content = await self.fs.read_file(full)
+            if content is not None:
+                for exp in parse_ts_config_objects(content):
+                    if exp["kind"] == "object":
+                        data = {
+                            k: exp["data"][k]
+                            for k in SITE_INFO_FIELDS
+                            if k in exp["data"]
+                        }
+                        if data:
+                            result["site_config"] = data
+                        break
+
+        mdx, mdx_err = self._resolve_config_file("friends.mdx")
+        if not mdx_err and await self.fs.exists(mdx):
+            content = await self.fs.read_file(mdx)
+            if content is not None:
+                for exp in parse_ts_config_objects(content):
+                    if exp["kind"] == "object" and exp["name"] == "site":
+                        result["site"] = exp["data"]
+                        break
+
+        return json_response({"status": "ok", "data": result})
+
+    async def _web_site_info_save(self):
+        data = await request.json(default={})
+        site_config = data.get("site_config")
+        site = data.get("site")
+        if not isinstance(site_config, dict) and not isinstance(site, dict):
+            return error_response("没有可保存的站点信息")
+        done = []
+
+        if isinstance(site_config, dict):
+            full, err = self._resolve_config_file("siteConfig.ts")
+            if err:
+                return error_response(err)
+            content = await self.fs.read_file(full)
+            if content is None:
+                return error_response("无法读取 siteConfig.ts")
+            payload = None
+            exp_name = None
+            for exp in parse_ts_config_objects(content):
+                if exp["kind"] == "object":
+                    payload = dict(exp["data"])
+                    exp_name = exp["name"]
+                    break
+            if payload is None:
+                return error_response("siteConfig.ts 中不存在可编辑的纯对象配置")
+            for k, v in site_config.items():
+                if k in SITE_INFO_FIELDS:
+                    payload[k] = v
+            try:
+                rebuilt = rebuild_ts_config(content, exp_name, payload)
+            except ValueError as e:
+                return error_response(f"重建 siteConfig.ts 失败: {e}")
+            if not await self.fs.write_file(full, rebuilt):
+                return error_response("写入 siteConfig.ts 失败")
+            done.append("siteConfig.ts")
+
+        if isinstance(site, dict):
+            mdx, mdx_err = self._resolve_config_file("friends.mdx")
+            if mdx_err:
+                return error_response(mdx_err)
+            content = await self.fs.read_file(mdx)
+            if content is None:
+                return error_response("无法读取 friends.mdx")
+            payload = None
+            for exp in parse_ts_config_objects(content):
+                if exp["kind"] == "object" and exp["name"] == "site":
+                    payload = dict(exp["data"])
+                    break
+            if payload is None:
+                return error_response("friends.mdx 中不存在 site 对象")
+            for k, v in site.items():
+                if isinstance(k, str):
+                    payload[k] = v
+            try:
+                rebuilt = rebuild_ts_config(content, "site", payload)
+            except ValueError as e:
+                return error_response(f"重建 friends.mdx 失败: {e}")
+            if not await self.fs.write_file(mdx, rebuilt):
+                return error_response("写入 friends.mdx 失败")
+            done.append("friends.mdx")
+
+        return json_response(
+            {"status": "ok", "data": {"saved": done}}
+        )
+
+    # ------------------------------------------------------------------
+    # 主题配置可视化（src/config 全部可编辑模块）
+    # ------------------------------------------------------------------
+
+    async def _web_theme_files(self):
+        files = []
+        for meta_file, meta in THEME_MODULE_META.items():
+            full, err = self._resolve_config_file(meta_file)
+            if err or not await self.fs.exists(full):
+                continue
+            content = await self.fs.read_file(full)
+            if content is None:
+                continue
+            exports = meta.get("export") or meta_file[:-3]
+            if isinstance(exports, str):
+                exports = [exports]
+            found = {}
+            for exp in parse_ts_config_objects(content):
+                if exp["name"] in exports:
+                    found[exp["name"]] = {
+                        "export": exp["name"],
+                        "kind": exp["kind"],
+                        "readonly": bool(collect_raw_paths(exp["data"])),
+                    }
+            source_only = [e for e in exports if e not in found]
+            files.append(
+                {
+                    "file": meta_file,
+                    "group": meta["group"],
+                    "name": meta["name"],
+                    "desc": meta["desc"],
+                    "exports": [found[e] for e in exports if e in found],
+                    "source_only": source_only,
+                }
+            )
+        groups = [{"key": k, "name": n} for k, n in THEME_GROUPS]
+        return json_response({"status": "ok", "data": {"groups": groups, "files": files}})
+
+    def _theme_enums_for(self, meta_file: str, data) -> dict:
+        """返回字段路径 -> 枚举选项（手动表优先，types 自动提取兜底）"""
+        enums = {}
+        manual = THEME_ENUMS.get(meta_file, {})
+        auto = {}
+        types_name = meta_file[: -len(".ts")] if meta_file.endswith(".ts") else meta_file
+        types_rel = "types/" + types_name + ".ts"
+        try:
+            types_full = self._resolve_src_path(types_rel)
+            if types_full and isinstance(self.fs, LocalFileSystem) and os.path.isfile(types_full):
+                t_content = open(types_full, encoding="utf-8").read()
+                auto = extract_types_enums(t_content)
+        except (ValueError, OSError):
+            auto = {}
+        for path in leaf_fields(data):
+            if path in manual:
+                enums[path] = manual[path]
+                continue
+            base = path.split(".")[-1]
+            if base in auto and base not in enums:
+                enums[path] = auto[base]
+        return enums
+
+    async def _web_theme_file(self):
+        if request.method == "GET":
+            return await self._web_theme_file_get()
+        return await self._web_theme_file_save()
+
+    async def _web_theme_file_get(self):
+        meta_file = str(request.query.get("file", "") or "")
+        export = str(request.query.get("export", "") or "")
+        full, err = self._resolve_config_file(meta_file)
+        if err:
+            return error_response(err)
+        content = await self.fs.read_file(full)
+        if content is None:
+            return error_response(f"无法读取 {meta_file}")
+        target = None
+        for exp in parse_ts_config_objects(content):
+            if exp["name"] == export:
+                target = exp
+                break
+        if target is None:
+            return error_response(f"{meta_file} 中不存在可编辑导出 {export}")
+        readonly = collect_raw_paths(target["data"])
+        enums = self._theme_enums_for(meta_file, target["data"])
+        return json_response(
+            {
+                "status": "ok",
+                "data": {
+                    "file": meta_file,
+                    "export": export,
+                    "kind": target["kind"],
+                    "data": clean_raw(target["data"]),
+                    "readonly": readonly,
+                    "enums": enums,
+                },
+            }
+        )
+
+    async def _web_theme_file_save(self):
+        data = await request.json(default={})
+        meta_file = str(data.get("file") or "")
+        export = str(data.get("export") or "")
+        user_data = data.get("data")
+        if user_data is None:
+            return error_response("缺少 data 字段")
+        full, err = self._resolve_config_file(meta_file)
+        if err:
+            return error_response(err)
+        content = await self.fs.read_file(full)
+        if content is None:
+            return error_response(f"无法读取 {meta_file}")
+        target = None
+        for exp in parse_ts_config_objects(content):
+            if exp["name"] == export:
+                target = exp
+                break
+        if target is None:
+            return error_response(f"{meta_file} 中不存在可编辑导出 {export}")
+        try:
+            if target["kind"] == "array":
+                if not isinstance(user_data, list):
+                    return error_response("数组导出需要列表数据")
+                rebuilt = rebuild_ts_array_export(content, export, user_data)
+            else:
+                if not isinstance(user_data, dict):
+                    return error_response("对象导出需要对象数据")
+                readonly = collect_raw_paths(target["data"])
+                safe_user = strip_paths(user_data, readonly)
+                merged = deep_merge(target["data"], safe_user)
+                rebuilt = rebuild_ts_config(content, export, merged)
+        except ValueError as e:
+            return error_response(f"重建 {meta_file} 失败: {e}")
+        try:
+            bak_dir = self._config_backups_dir()
+            os.makedirs(bak_dir, exist_ok=True)
+            from datetime import datetime as _dt
+            ts = _dt.now().strftime("%Y%m%d_%H%M%S")
+            bak_name = os.path.basename(full) + f".{ts}.bak"
+            bak = os.path.join(bak_dir, bak_name)
+            if isinstance(self.fs, LocalFileSystem):
+                with open(bak, "w", encoding="utf-8") as f:
+                    f.write(content)
+            else:
+                await self.fs.write_file(bak, content)
+            self._cleanup_old_backups(bak_dir, os.path.basename(full))
+        except Exception:
+            pass
+        if not await self.fs.write_file(full, rebuilt):
+            return error_response(f"写入 {meta_file} 失败")
+        return json_response(
+            {"status": "ok", "data": {"file": meta_file, "export": export, "saved": True}}
+        )
+
+    # ------------------------------------------------------------------
+    # 构建 / 部署任务（状态页按钮）
+    # ------------------------------------------------------------------
+
+    _BUILD_TASKS_MAX = 20
+
+    def _build_tasks_store(self) -> dict:
+        if not hasattr(self, "_build_tasks"):
+            self._build_tasks = {}
+            self._build_task_seq = 0
+        if len(self._build_tasks) > self._BUILD_TASKS_MAX:
+            keys = sorted(self._build_tasks.keys())
+            for k in keys[: len(keys) - self._BUILD_TASKS_MAX]:
+                self._build_tasks.pop(k, None)
+        return self._build_tasks
+
+    async def _web_build_deploy(self):
+        if request.method == "POST":
+            return await self._web_build_deploy_start()
+        return await self._web_build_deploy_query()
+
+    async def _web_build_deploy_start(self):
+        data = await request.json(default={})
+        mode = str(data.get("mode") or "both")
+        if mode not in ("both", "build", "deploy"):
+            return error_response("无效的构建模式")
+        if getattr(self, "build_manager", None) is None:
+            return error_response("构建管理器未初始化（未检测到已部署的博客），请先在状态页配置博客目录")
+        store = self._build_tasks_store()
+        running = any(t.get("status") == "running" for t in store.values())
+        if running:
+            return error_response("已有构建任务进行中，请等待完成后再发起新任务")
+        self._build_task_seq += 1
+        task_id = self._build_task_seq
+        store[task_id] = {"status": "running", "log": [], "message": "", "ok": None}
+        asyncio.create_task(self._run_build_task(task_id, mode))
+        return json_response({"status": "ok", "data": {"task_id": task_id, "mode": mode}})
+
+    _BUILD_TASK_TIMEOUT = 3600
+
+    async def _run_build_task(self, task_id: int, mode: str) -> None:
+        store = self._build_tasks_store()
+        task = store[task_id]
+        steps = []
+
+        def upd(line: str) -> None:
+            steps.append(line)
+            task["log"] = list(steps)
+
+        try:
+            bm = self.build_manager
+            if bm is None:
+                raise RuntimeError("构建管理器未初始化")
+
+            async def _do_build():
+                if mode in ("both", "build"):
+                    upd("正在检查构建环境...")
+                    ok, msg = await bm.check_environment()
+                    if not ok:
+                        raise RuntimeError(f"环境检查失败: {msg}")
+                    upd(f"[OK] 环境检查: {msg}")
+                    if mode == "both" and not await bm.check_dependencies_installed():
+                        upd("依赖未安装，正在安装（可能需要几分钟）...")
+                        ok, msg = await bm.install_dependencies()
+                        if not ok:
+                            raise RuntimeError(f"依赖安装失败: {msg}")
+                        upd(f"[OK] 依赖安装: {msg}")
+                    upd("正在构建博客（pnpm build）...")
+                    ok, msg = await bm.build()
+                    if not ok:
+                        raise RuntimeError(f"构建失败: {msg}")
+                    upd(f"[OK] 构建: {msg}")
+                if mode in ("both", "deploy"):
+                    upd("正在部署...")
+                    ok, msg = await bm.deploy()
+                    if not ok:
+                        raise RuntimeError(f"部署失败: {msg}")
+                    upd(f"[OK] 部署: {msg}")
+
+            await asyncio.wait_for(_do_build(), timeout=self._BUILD_TASK_TIMEOUT)
+            task["status"] = "done"
+            task["ok"] = True
+            task["message"] = "\n".join(steps)
+        except asyncio.TimeoutError:
+            task["status"] = "done"
+            task["ok"] = False
+            task["message"] = "\n".join(steps) + f"\n[ERROR] 构建任务超时（超过 {self._BUILD_TASK_TIMEOUT} 秒）"
+        except Exception as e:
+            task["status"] = "done"
+            task["ok"] = False
+            task["message"] = "\n".join(steps) + (f"\n[ERROR] {e}" if steps else str(e))
+
+    async def _web_build_deploy_query(self):
+        store = self._build_tasks_store()
+        tid = request.query.get("task_id", "")
+        if tid and tid.isdigit():
+            task = store.get(int(tid))
+            if task is None:
+                return error_response("任务不存在或已过期")
+            return json_response({"status": "ok", "data": {"task": task}})
+        latest = max(store.items(), key=lambda kv: kv[0]) if store else None
+        return json_response(
+            {
+                "status": "ok",
+                "data": {
+                    "task": dict(latest[1], task_id=latest[0]) if latest else None
+                },
+            }
+        )
+
+    # ------------------------------------------------------------------
     # 站点配置管理（src/config 下纯对象配置文件）
     # ------------------------------------------------------------------
 
     def _resolve_config_file(self, name: str) -> tuple[Optional[str], Optional[str]]:
-        """校验配置文件名称并解析到 src/config 下，返回 (路径, 错误)"""
+        """校验配置文件名称并解析到博客 src 下，返回 (路径, 错误)
+
+        普通配置文件位于 src/config 下（*.ts）；friends.mdx 为对外展示中的
+        站点信息文件，位于 src/content/spec 下。
+        """
         name = (name or "").strip().replace("\\", "/")
-        if not name or os.path.basename(name) != name or not name.endswith(".ts"):
+        if not name or os.path.basename(name) != name:
+            return None, "非法配置文件名称"
+        if name.lower() == "friends.mdx":
+            try:
+                return self._resolve_src_path("content/spec/friends.mdx"), None
+            except ValueError as e:
+                return None, f"非法路径: {e}"
+        if not name.endswith(".ts"):
             return None, "非法配置文件名称"
         try:
             return self._resolve_src_path("config/" + name), None
@@ -1280,6 +1326,7 @@ class WebUIMixin:
                         "mtime": entry["mtime"],
                     }
                 )
+        files.sort(key=lambda f: (f.get("group", "") != "core", f["name"].lower()))
         return json_response({"status": "ok", "data": {"files": files}})
 
     async def _web_config_file(self):

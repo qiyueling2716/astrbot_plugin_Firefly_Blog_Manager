@@ -1,14 +1,15 @@
-# AstrBot Firefly Blog Manager
+# Firefly 博客管理（AstrBot 插件）
 
-让 AstrBot 的 AI Agent 通过自然语言指令管理你的 [Firefly 博客](https://github.com/qiyueling2716/Firefly-Blog)，并提供内置 Dashboard 管理页面。
+让 AstrBot 的 AI 助手帮你用自然语言管理 [Firefly 博客](https://github.com/qiyueling2716/Firefly-Blog)：写文章、审投稿、构建部署，并提供可视化管理页面。
 
 ## 功能总览
 
-- **文章管理**：创建、删除、列出、查看、更新、搜索文章（YAML Front-matter 完整支持）
-- **投稿系统**：任何人可投稿，管理员审核后发布；支持 AI 初审（自动评分与建议）
-- **构建部署**：环境检查 → 依赖安装 → 构建 → 部署（rsync/scp，自动回退）
-- **进阶语法**：GitHub 卡片、Admonitions、Spoiler、图片画廊、Expressive Code、Mermaid、PlantUML、KaTeX（可独立开关）
-- **WebUI 管理页面**：博客状态、src 文件管理、对外展示配置编辑、随机壁纸背景
+- **文章管理**：对话即可创建、删除、查找、更新、搜索文章（支持正则搜索），完整支持 YAML Front-matter，编辑/删除前自动备份
+- **分类与标签**：AI 可直接查看博客所有分类和标签（按文章数排序），无需翻阅文件
+- **投稿系统**：读者直接投稿（支持指定标签和分类），AI 初审评分，管理员审核后发布
+- **构建部署**：一条指令或一键按钮完成 环境检查 → 依赖安装 → 构建 → 部署，支持取消和日志回溯
+- **进阶语法**：GitHub 卡片、Admonitions、Spoiler、图片画廊、Mermaid、PlantUML、KaTeX 等，可独立开关
+- **管理页面**：博客状态、文件管理、站点配置（友链/公告/音乐/留言板/打赏/相册/关于我/RSS）、主题配置、插件配置
 
 ## 系统要求
 
@@ -16,9 +17,9 @@
 |------|----------|------|
 | AstrBot | >= 4.16 | 插件运行环境 |
 | Python | >= 3.10 | 插件依赖 |
-| Node.js | >= 22 | Firefly 博客构建需要（由构建/部署脚本自动检查） |
+| Node.js | >= 22 | 构建博客需要（自动检测） |
 
-> 构建 `pnpm build` 约占用 **1.5GB 内存**。AstrBot 服务器内存不足（< 2GB）时请使用 `remote_build` 模式，让远端承担构建。
+> 构建约需 **1.5GB 内存**。服务器内存不足（< 2GB）时请使用 `remote_build` 模式，让远端承担构建。
 
 ## 安装
 
@@ -29,13 +30,13 @@ cd astrbot_plugin_Firefly_Blog_Manager
 pip install -r requirements.txt
 ```
 
-然后在 AstrBot WebUI → 插件管理 中重载插件。也可直接在 WebUI 中按仓库地址在线安装。
+然后在 AstrBot 面板 → 插件管理中重载插件。也可在面板中按仓库地址直接在线安装。
 
 ## 使用方式
 
 ### 自然语言（推荐）
 
-直接对 AI 说话即可：*"帮我写一篇 Docker 入门"*、*"删除文章 Docker 快速入门"*、*"列出所有文章"*。
+直接对 AI 说话即可：*"帮我写一篇 Docker 入门"*、*"删除文章《Docker 快速入门》"*、*"列出所有文章"*。
 
 ### 显式指令
 
@@ -52,21 +53,41 @@ pip install -r requirements.txt
 | `/博客部署` | 管理员 | 部署博客到服务器 |
 | `/博客投稿列表` | 管理员 | 查看待审核投稿 |
 
+## 管理页面
+
+在 AstrBot 面板「插件管理 → 插件详情 → 页面」中打开，包含五个页签：
+
+- **状态**：部署模式、博客检测结果、构建状态、文章数量、内存状态；「仅构建」与「构建并部署」一键按钮（环境检查 → 依赖安装 → 构建 → 部署，页面实时展示进度）；未检测到博客时可手动指定根目录或重新自动检测
+- **站点配置**：博客对外展示内容一站管理：
+  - **友链**：条目式行编辑（标题/链接/头像/描述/标签/权重/启用），可任意添加删除
+  - **站点信息**：网站标题/副标题/网址/描述/关键词；友链申请页展示信息与申请邮箱
+  - **公告 / 音乐 / 留言板**：公告内容；音乐播放来源与歌单；留言板评论系统（Twikoo / Waline / Giscus / Disqus / Artalk / 关闭）
+  - **打赏**：标题/描述/使用说明/展示开关，打赏方式（名称/图标/收款码/外链/描述/启用）与打赏者名单（名称/金额/日期）行式增删
+  - **相册**：列宽与相册条目（ID/名称/描述/地点/日期/标签/访问密码）行式增删，图片放到博客 `public/gallery/<相册ID>/` 目录
+  - **关于我 / RSS**：头像/名字/签名/邮箱与社交链接；RSS 订阅地址由站点信息自动生成
+- **文件管理**：树形浏览博客 `src/` 目录，在线编辑/新建/删除/上传，图片等二进制文件内嵌预览；`remote_build` 模式下操作远端仓库
+- **主题配置**：博客全部主题配置（6 组分类）可视化编辑——开关/数字/文本/枚举下拉/列表/表格；代码生成的配置自动只读，提示使用文件管理；保存前自动备份 `.bak` 文件
+- **插件配置**：插件全部配置项表单化编辑（开关/下拉/数字/文本），保存即时生效；SSH 密码等敏感字段不回显、留空不修改
+
+> 页面会自动从博客壁纸目录随机选取背景图。未检测到已部署的博客时，顶部会提示使用部署脚本初始化。
+
+> 安全：文件操作严格限定在博客 `src/` 目录内；页面与接口由 AstrBot 内置登录鉴权保护。
+
 ## 部署模式
 
 | 模式 | 构建位置 | 部署位置 | 适用场景 |
 |------|----------|----------|----------|
-| `local_build` | AstrBot 服务器 | SSH 推送到远端 `remote_web_root` | AstrBot 在云服务器，远端是低配 VPS |
-| `remote_build` | 远端服务器（SSH） | 远端仓库构建后复制到 `remote_web_root` | AstrBot 在本地/树莓派，远端性能更好 |
-| `local_only` | AstrBot 服务器 | 同一台机器的 `web_root` | 单服务器部署 |
+| `local_build` | AstrBot 服务器 | SSH 推送到远端 | AstrBot 在云服务器，远端是低配 VPS |
+| `remote_build` | 远端服务器（SSH） | 远端部署目录 | AstrBot 在本地/低配设备，远端性能更好 |
+| `local_only` | AstrBot 服务器 | 同一台机器的部署目录 | 单服务器部署 |
 
 **路径约定**：
 - `local_blog_root`：博客**源码**根目录（含 `package.json` 与 `src/content/posts/`），构建的源
-- `web_root` / `remote_web_root`：博客**部署目录**（构建产物 `dist/` 复制到此，Nginx root 应指向这里）
+- `web_root` / `remote_web_root`：博客**部署目录**（构建产物复制到此，Nginx root 指向这里）
 
 ## 一键部署脚本
 
-插件目录的 `deploy.sh`（Linux/macOS）与 `deploy.ps1`（Windows）**独立于 AstrBot 运行**，适合服务器初始化 / CI/CD。脚本自动检测并安装 Python、Node.js（>=22）、pnpm 与依赖，克隆博客仓库、构建部署，可选自动配置 Nginx/Apache、HTTPS、资源监控与备份。
+插件目录的 `deploy.sh`（Linux/macOS）与 `deploy.ps1`（Windows）**独立于 AstrBot 运行**，适合服务器初始化 / CI/CD：自动检测并安装 Python、Node.js（>=22）、pnpm 与依赖，克隆博客仓库、构建部署，可选自动配置 Nginx/Apache、HTTPS、资源监控与备份。
 
 ```bash
 cp deploy.conf.example deploy.conf   # 编辑填写实际值
@@ -77,7 +98,7 @@ chmod +x deploy.sh && ./deploy.sh
 
 ### 网络加速（下载慢 / 卡住时）
 
-国内网络环境建议设置 `USE_CN_MIRROR=1`：克隆自动依次尝试内置 GitHub 镜像（每个源有超时），npm/pnpm 自动切换到 npmmirror 源；官方源失败时自动重试镜像源。其他可调项：
+国内网络环境建议设置 `USE_CN_MIRROR=1`：克隆自动依次尝试内置镜像（每个源有超时），npm/pnpm 自动切换 npmmirror 源；官方源失败时自动重试镜像源。其他可调项：
 
 | 配置项 | 默认 | 说明 |
 |--------|------|------|
@@ -89,26 +110,12 @@ chmod +x deploy.sh && ./deploy.sh
 | `REMOTE_CMD_TIMEOUT` | `3600` | 远程构建总超时（remote_build） |
 | `AUTO_YES` | `0` | 设为 `1` 跳过所有交互确认（CI 自动生效） |
 
-所有下载、克隆、SSH/rsync 操作均带超时，非交互环境（CI / 后台）不会卡在确认提示上。
-
-HTTPS（`ENABLE_HTTPS` + 证书路径）、Web 服务器（`WEB_SERVER=nginx|apache|none`）、资源告警阈值（`RESOURCE_WARNING_CPU/MEM`）等均可在 `deploy.conf` 中配置，示例见 `deploy.conf.example`。
+所有下载、克隆、SSH/rsync 操作均带超时，非交互环境（CI / 后台）不会卡在确认提示上。HTTPS（`ENABLE_HTTPS` + 证书路径）、Web 服务器（`WEB_SERVER=nginx|apache|none`）、资源告警阈值等均可在 `deploy.conf` 中配置，示例见 `deploy.conf.example`。
 
 ## SSH 认证
 
 1. **密钥认证（推荐）**：`ssh-keygen -t ed25519` 生成密钥，`ssh-copy-id` 复制公钥到服务器，配置 `auth_type=key` 与 `private_key_path`。请确保服务器允许密钥登录
 2. **密码认证**：配置 `auth_type=password` 与 `password` 即可
-
-## WebUI 管理页面
-
-在 AstrBot Dashboard「插件管理 → 插件详情 → 页面」中打开。包含三个标签页：
-
-- **状态**：部署模式、博客检测结果、构建状态、文章数量、内存状态；未检测到博客时可手动指定根目录或重新自动检测
-- **文件管理**：树形浏览博客 `src/` 目录，在线编辑/新建/删除/上传。图片等二进制文件以预览方式查看。`remote_build` 模式下操作远端仓库
-- **对外展示**：表格化编辑 friendsConfig.ts / socialConfig.ts / footerConfig.ts（可在插件配置中追加）等对外展示配置，只重建对应数组块，文件其余内容原样保留
-
-**壁纸背景**：打开页面时自动从博客 `src/assets/images/DesktopWallpaper`（桌面端）或 `MobileWallpaper`（移动端）随机选取一张作为背景。**未检测到已部署的博客时**，页面顶部会提示使用插件目录下的 `deploy.sh` / `deploy.ps1` 部署。
-
-> 安全：文件操作严格限定在博客 `src/` 目录内（路径穿越、绝对路径均被拒绝）；页面与 Web API 由 AstrBot 内置鉴权保护（Dashboard 登录 + plugin 权限域）。
 
 ## 配置项
 
@@ -127,8 +134,7 @@ HTTPS（`ENABLE_HTTPS` + 证书路径）、Web 服务器（`WEB_SERVER=nginx|apa
 | `build_memory_threshold` | 整数 | 内存低于该值（MB）时跳过构建，默认 1536 |
 | `build_memory_limit` | 整数 | 构建内存限制（MB），0 不限制 |
 | `allow_build_concurrent` | 布尔 | 是否允许并发构建 |
-| `allow_only_owner` | 布尔 | 是否只允许管理员使用非构建类工具 |
-| `owner_user_id` / `admin_users` | 字符串/列表 | 管理员回退配置（优先用 AstrBot 框架权限系统） |
+| `admin_umo` | 字符串 | 管理员标识，详见下方"权限控制" |
 | `enable_advanced_syntax` | 布尔 | 进阶 Markdown 语法总开关 |
 | `advanced_syntax_*` | 布尔 | 8 个子开关（github_card / admonitions / spoiler / image_grid / code_blocks / mermaid / plantuml / katex） |
 | `enable_ai_review` | 布尔 | 投稿 AI 初审开关 |
@@ -138,7 +144,6 @@ HTTPS（`ENABLE_HTTPS` + 证书路径）、Web 服务器（`WEB_SERVER=nginx|apa
 - 文章管理、构建部署、投稿审核工具：**始终要求管理员权限**
 - 投稿（提交/撤回）：**任何人可用**
 - 权限判定优先复用 AstrBot 框架的 `event.is_admin()`，其次匹配 `admin_umo`（支持 `platform:user_id` 完整格式或仅用户 ID）
-- 未配置 `admin_umo` 时所有管理操作免验证（方便调试）
 
 ```yaml
 admin_umo: "123456789"        # 推荐：仅用户 ID，匹配任意平台
@@ -149,7 +154,7 @@ admin_umo: "123456789"        # 推荐：仅用户 ID，匹配任意平台
 
 ### AI 初审
 
-开启 `enable_ai_review` 后，投稿提交时自动调用 LLM 评估：内容质量评分（0-10）、优点、问题、改进建议、过审/打回建议。结果持久化，管理员可在投稿详情中查看。关闭后仅发送提醒通知。
+开启 `enable_ai_review` 后，投稿提交时自动调用大模型评估：内容质量评分（0-10）、优点、问题、改进建议、过审/打回建议。结果持久化，管理员可在投稿详情中查看。关闭后仅发送提醒通知。
 
 ## 常见问题
 
@@ -159,38 +164,20 @@ admin_umo: "123456789"        # 推荐：仅用户 ID，匹配任意平台
 **Q: 文章修改后网站没变化？**
 Firefly 是静态博客，修改后必须重新构建并部署。
 
+**Q: 站点配置/主题配置改完没生效？**
+同上，重新构建并部署即可（管理页「状态」页有一键按钮）。
+
 **Q: pnpm 依赖没装？**
-`node_modules` 不存在时，构建前先运行 `install_blog_dependencies` 工具（或 `pnpm install`）。
+`node_modules` 不存在时，构建前先运行依赖安装（`/博客构建` 会自动检查，或先执行 `install_blog_dependencies` 工具）。
 
 **Q: SSH 断联？**
-插件基于 asyncssh，自带 keepalive（30 秒 / 3 次重试），下次操作自动重连。
+插件自带保活与自动重连，下次操作自动重连。
 
 **Q: 如何启用 HTTPS？**
 在 `deploy.conf` 中配置 `DOMAIN_NAME`、`ENABLE_HTTPS=true`、`SSL_CERT_PATH`、`SSL_CERT_KEY_PATH`，脚本自动配置并做 HTTP → HTTPS 重定向。
 
-## 技术细节
-
-- 远程操作基于 asyncssh，异步非阻塞，密码经临时文件传递（不出现在进程列表/命令行）
-- 命令注入防护：参数 `shlex.quote()` 转义 + 危险 shell 模式检测
-- 构建超时 10 分钟，部署超时 5 分钟；部署优先 rsync，失败回退 scp
-- 主机密钥验证默认开启（防中间人）
-
-## 项目结构
-
-```
-astrbot_plugin_Firefly_Blog_Manager/
-├── main.py / constants.py / models.py / common.py   # 入口、常量、模型、工具
-├── executors.py / filesystem.py                      # 命令执行（本地/SSH）、文件系统（本地/SFTP）
-├── blog_manager.py / build_deploy.py                 # 文章管理、构建部署
-├── webui.py / pages/manager/                         # WebUI 后端与前端页面
-├── metadata.yaml / _conf_schema.json                 # 元数据与配置定义
-├── requirements.txt
-├── deploy.sh / deploy.ps1 / deploy.conf.example      # 独立部署脚本
-└── CHANGELOG.md / LICENSE
-```
-
-## 开发者
+## 许可
 
 - 作者：月凌
 - 仓库：https://github.com/qiyueling2716/astrbot_plugin_Firefly_Blog_Manager
-- 许可证：MIT
+- 许可证：[GPL-3.0](./LICENSE)

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import os
 import re
+import shlex
 import time
 from abc import ABC, abstractmethod
 from enum import Enum
@@ -256,7 +257,7 @@ class RemoteExecutor(CommandExecutor):
             await self._ensure_connected()
 
             if cwd:
-                command = f"cd {cwd} && {command}"
+                command = f"cd {shlex.quote(cwd)} && {command}"
 
             try:
                 result = await self._conn.run(command, timeout=timeout)

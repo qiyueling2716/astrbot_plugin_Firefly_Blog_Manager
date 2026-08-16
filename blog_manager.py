@@ -44,6 +44,7 @@ class BlogManager:
                     category=metadata.category,
                     tags=metadata.tags,
                     draft=metadata.draft,
+                    pinned=metadata.pinned,
                 ))
             except Exception as e:
                 logger.warning(f"读取文章失败 {filepath}: {e}")

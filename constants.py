@@ -21,20 +21,24 @@ SSH_KEEPALIVE_COUNT_MAX = 3
 PLUGIN_NAME = "astrbot_plugin_Firefly_Blog_Manager"
 
 # 插件版本号（与 metadata.yaml 保持一致，用于 @register 和帮助菜单展示）
-PLUGIN_VERSION = "1.8.7"
+PLUGIN_VERSION = "1.10.0"
 
 # ============================================================================
 # 对外展示配置文件
 # ============================================================================
 
-# 归入"对外展示"管理的配置文件（站点对外展示内容：友链/关于我-社交链接/页脚等），
+# 归入"对外展示"管理的配置文件（站点对外展示内容：友链/关于我-社交链接/页脚/站点信息等），
 # 可在插件配置 external_config_files 中追加自定义文件名
 EXTERNAL_CONFIG_FILES = [
     "friendsConfig.ts",  # 友链
     "profileConfig.ts",  # 关于我（社交链接等）
     "socialConfig.ts",   # 社交链接（独立文件时）
     "footerConfig.ts",   # 页脚
+    "friends.mdx",       # 站点信息（friends 页展示：名称/描述/链接/头像/申请邮箱）
 ]
+
+# 站点信息页可编辑的 siteConfig.ts 核心字段（其余字段保持原样）
+SITE_INFO_FIELDS = ["title", "subtitle", "site_url", "description", "keywords"]
 
 # ============================================================================
 # 进阶语法功能元数据定义
@@ -239,3 +243,171 @@ ADVANCED_SYNTAX_FEATURES = {
     },
 }
 
+
+# ============================================================================
+# 主题配置可视化元数据（src/config 下可结构化编辑的配置模块）
+# ============================================================================
+
+# 主题配置分组（key -> 中文名）
+THEME_GROUPS = [
+    ("site", "站点"),
+    ("appearance", "外观"),
+    ("layout", "布局与导航"),
+    ("interactive", "互动内容"),
+    ("admin", "站务"),
+    ("profile", "关于与社交"),
+]
+
+# 各配置模块元数据：文件名 -> {group, name, desc, export(可选，默认同名)}
+# export 可为列表（同一文件多个可编辑导出）；None 表示主体不可字面量编辑（函数生成）
+THEME_MODULE_META = {
+    "siteConfig.ts": {
+        "group": "site",
+        "name": "站点基础",
+        "desc": "站点标题/描述/主题色、导航栏、页面开关、文章列表与内容页、分页、图片优化、Bangumi",
+    },
+    "backgroundWallpaper.ts": {
+        "group": "appearance",
+        "name": "背景壁纸",
+        "desc": "壁纸模式、横幅文字、水波纹、渐变、毛玻璃、轮播等",
+    },
+    "fontConfig.ts": {
+        "group": "appearance",
+        "name": "字体",
+        "desc": "字体开关、预加载、选中字体与字体库、标题字体",
+    },
+    "effectsConfig.ts": {
+        "group": "appearance",
+        "name": "樱花特效",
+        "desc": "樱花数量、速度、尺寸、透明度、层级（sakuraConfig）",
+        "export": "sakuraConfig",
+    },
+    "expressiveCodeConfig.ts": {
+        "group": "appearance",
+        "name": "代码高亮",
+        "desc": "亮色/暗色主题、折叠插件、语言徽章",
+    },
+    "coverImageConfig.ts": {
+        "group": "appearance",
+        "name": "封面图",
+        "desc": "文章封面图、随机封面 API 列表",
+    },
+    "sidebarConfig.ts": {
+        "group": "layout",
+        "name": "侧边栏",
+        "desc": "左右侧边栏组件列表、位置、平板端与文章页显示",
+        "export": "sidebarLayoutConfig",
+    },
+    "navBarConfig.ts": {
+        "group": "layout",
+        "name": "导航栏",
+        "desc": "链接预设（名称/图标/URL 与子菜单）与搜索方式；导航栏主体由代码动态生成，仅可源码编辑",
+        "export": ["LinkPresets", "navBarSearchConfig", "navBarConfig"],
+    },
+    "commentConfig.ts": {
+        "group": "interactive",
+        "name": "评论系统",
+        "desc": "评论系统选择（Twikoo/Waline/Artalk/Giscus/Disqus）及各系统参数",
+    },
+    "musicConfig.ts": {
+        "group": "interactive",
+        "name": "音乐播放器",
+        "desc": "Meting / 本地音乐播放、音量、播放模式、歌词",
+        "export": "musicPlayerConfig",
+    },
+    "sponsorConfig.ts": {
+        "group": "interactive",
+        "name": "打赏",
+        "desc": "打赏标题/说明、打赏方式与打赏者列表",
+    },
+    "galleryConfig.ts": {
+        "group": "interactive",
+        "name": "相册",
+        "desc": "相册列表与瀑布流列宽",
+    },
+    "friendsConfig.ts": {
+        "group": "interactive",
+        "name": "友链（列表与页面）",
+        "desc": "友链列表、页面标题/描述/评论开关等（列表另有对外展示快捷入口）",
+        "export": ["friendsConfig", "friendsPageConfig"],
+    },
+    "announcementConfig.ts": {
+        "group": "admin",
+        "name": "公告",
+        "desc": "公告条标题/内容、可关闭、链接",
+    },
+    "analyticsConfig.ts": {
+        "group": "admin",
+        "name": "统计分析",
+        "desc": "Google Analytics、Microsoft Clarity、Umami、51la",
+    },
+    "pioConfig.ts": {
+        "group": "admin",
+        "name": "看板娘",
+        "desc": "Spine 模型（位置/尺寸/交互动画/消息）与 Live2D 模型",
+        "export": ["spineModelConfig", "live2dWidgetConfig"],
+    },
+    "licenseConfig.ts": {
+        "group": "admin",
+        "name": "许可证",
+        "desc": "CC 协议开关、名称与链接",
+    },
+    "plantumlConfig.ts": {
+        "group": "admin",
+        "name": "PlantUML",
+        "desc": "图表渲染服务器与亮色/暗色主题",
+    },
+    "footerConfig.ts": {
+        "group": "admin",
+        "name": "页脚",
+        "desc": "页脚自定义 HTML（如备案号）",
+    },
+    "profileConfig.ts": {
+        "group": "profile",
+        "name": "关于我",
+        "desc": "头像、姓名、简介与社交链接（另有对外展示快捷入口）",
+    },
+}
+
+# 手动补充的字段枚举（路径 -> 选项列表），优先级高于 types 自动提取；
+# 路径支持数组条目：`[].field`。仅列高频枚举字段，其余字段自动按类型渲染。
+THEME_ENUMS = {
+    "siteConfig.ts": {
+        "themeColor.defaultMode": ["light", "dark", "system"],
+        "postListLayout.defaultMode": ["list", "grid"],
+        "postListLayout.mobileDefaultMode": ["list", "grid"],
+        "post.rehypeCallouts.theme": ["github", "obsidian", "vitepress", "docusaurus"],
+        "bangumi.mode": ["static", "dynamic"],
+        "imageOptimization.formats": ["avif", "webp", "both"],
+        "navbar.menuAlign": ["left", "center"],
+    },
+    "backgroundWallpaper.ts": {
+        "mode": ["banner", "fullscreen", "overlay", "none"],
+        "common.playerMode": ["random", "sequence"],
+    },
+    "sidebarConfig.ts": {
+        "position": ["left", "right", "both"],
+        "tabletSidebar": ["left", "right"],
+        "[].type": [
+            "profile", "announcement", "categories", "tags", "sidebarToc",
+            "advertisement", "stats", "calendar", "music", "siteInfo",
+        ],
+        "[].position": ["top", "sticky"],
+    },
+    "commentConfig.ts": {
+        "type": ["none", "twikoo", "waline", "artalk", "giscus", "disqus"],
+        "waline.login": ["enable", "disable"],
+    },
+    "musicConfig.ts": {
+        "mode": ["meting", "local"],
+        "playMode": ["list", "one", "random"],
+        "meting.server": ["netease", "tencent", "kugou", "xiami", "baidu"],
+    },
+    "expressiveCodeConfig.ts": {
+        "darkTheme": ["github-dark", "one-dark-pro", "dracula", "tokyo-night", "min-dark", "solarized-dark"],
+        "lightTheme": ["github-light", "one-light", "min-light", "solarized-light"],
+    },
+    "pioConfig.ts": {
+        "position.corner": ["bottom-left", "bottom-right", "top-left", "top-right"],
+    },
+}

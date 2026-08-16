@@ -190,6 +190,7 @@ class PostInfo:
     category: str
     tags: list
     draft: bool
+    pinned: bool = False
 
 
 @dataclass

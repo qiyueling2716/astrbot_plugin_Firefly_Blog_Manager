@@ -1,5 +1,5 @@
 """
-AstrBot Firefly 博客管理插件 v1.8.7
+AstrBot Firefly 博客管理插件 v1.10.0
 
 通过 AI 指令管理 Firefly 博客的文章和部署。
 支持三种部署模式：
@@ -26,6 +26,7 @@ import json
 import os
 import posixpath
 import re
+import shlex
 import shutil
 import time
 import uuid
@@ -108,6 +109,16 @@ class FireflyBlogManager(WebUIMixin, Star):
         self._submissions_file = self._get_submissions_file()
         self._submissions_cache = self._load_submissions()
 
+    def _get_backup_dir(self) -> str:
+        try:
+            from astrbot.core.star.star_tools import StarTools
+            data_dir = str(StarTools.get_data_dir())
+            backup_dir = os.path.join(data_dir, "backups")
+        except Exception:
+            backup_dir = os.path.join(self.plugin_dir, "backups")
+        os.makedirs(backup_dir, exist_ok=True)
+        return backup_dir
+
     def _get_submissions_file(self) -> str:
         """获取投稿缓存文件路径
 
@@ -151,9 +162,23 @@ class FireflyBlogManager(WebUIMixin, Star):
             logger.warning(f"[Firefly] 加载投稿缓存失败: {e}")
         return {}
     
+    _SUBMISSIONS_CACHE_MAX = 500  # 投稿缓存最大条目数
+
     def _save_submissions(self) -> bool:
-        """保存投稿缓存到文件"""
+        """保存投稿缓存到文件，超限自动淘汰最旧的 rejected"""
         try:
+            # 超限淘汰：优先淘汰 rejected，其次 oldest
+            while len(self._submissions_cache) > self._SUBMISSIONS_CACHE_MAX:
+                rejected = [
+                    (sid, s) for sid, s in self._submissions_cache.items()
+                    if s.get("status") == "rejected"
+                ]
+                if rejected:
+                    oldest_rejected = min(rejected, key=lambda x: x[1].get("submit_time", ""))
+                    del self._submissions_cache[oldest_rejected[0]]
+                else:
+                    oldest = min(self._submissions_cache.items(), key=lambda x: x[1].get("submit_time", ""))
+                    del self._submissions_cache[oldest[0]]
             with open(self._submissions_file, 'w', encoding='utf-8') as f:
                 json.dump(self._submissions_cache, f, ensure_ascii=False, indent=2)
             # 安全最佳实践：显式设置文件权限，避免依赖 umask
@@ -739,6 +764,28 @@ class FireflyBlogManager(WebUIMixin, Star):
             yield f"[ERROR] 文章《{title}》不存在"
             return
 
+        # 删除前备份
+        old_content = await self.blog_manager.read_post(filename)
+        if old_content:
+            backup_dir = self._get_backup_dir()
+            os.makedirs(backup_dir, exist_ok=True)
+            backup_path = os.path.join(backup_dir, f"{filename}.{datetime.now().strftime('%Y%m%d%H%M%S')}.bak")
+            try:
+                with open(backup_path, 'w', encoding='utf-8') as f:
+                    f.write(old_content)
+                # 清理旧备份：每个文件最多保留 5 个
+                backups = sorted(
+                    [f for f in os.listdir(backup_dir) if f.startswith(filename) and f.endswith('.bak')],
+                    reverse=True,
+                )
+                for old_bak in backups[5:]:
+                    try:
+                        os.remove(os.path.join(backup_dir, old_bak))
+                    except OSError:
+                        pass
+            except Exception as e:
+                logger.warning(f"[Firefly] 备份文章 {filename} 失败: {e}")
+
         if await self.blog_manager.delete_post(filename):
             yield f"[OK] 文章《{title}》已删除\n提示：删除后需要重新构建部署才能生效"
         else:
@@ -787,6 +834,7 @@ class FireflyBlogManager(WebUIMixin, Star):
         description: str = "",
         slug: str = "",
         pinned: bool = None,
+        draft: bool = None,
         image: str = "",
         author: str = "",
         comment: bool = None,
@@ -802,6 +850,7 @@ class FireflyBlogManager(WebUIMixin, Star):
             description(string): 新的描述，为空则不修改
             slug(string): 自定义文章URL路径，为空则不修改
             pinned(boolean): 是否置顶文章，为None则不修改
+            draft(boolean): 是否设为草稿，为None则不修改
             image(string): 文章封面图片路径，为空则不修改
             author(string): 文章作者，为空则不修改
             comment(boolean): 是否启用评论功能，为None则不修改
@@ -828,7 +877,7 @@ class FireflyBlogManager(WebUIMixin, Star):
 
             metadata.title = new_title
             metadata.updated = datetime.now().strftime("%Y-%m-%d")
-            
+
             # 同时应用其他更新
             if new_content:
                 body = new_content
@@ -848,14 +897,24 @@ class FireflyBlogManager(WebUIMixin, Star):
                 metadata.author = author
             if comment is not None:
                 metadata.comment = comment
+            if draft is not None:
+                metadata.draft = draft
 
             new_full_content = metadata.to_yaml() + "\n" + body
 
-            if await self.blog_manager.write_post(new_filename, new_full_content):
-                await self.blog_manager.delete_post(old_filename)
-                yield f"[OK] 文章已重命名为《{new_title}》\n提示：需要重新构建部署才能生效"
-            else:
-                yield "[ERROR] 更新文章失败"
+            # 先写新文件，成功后再删旧文件（原子操作）
+            if not await self.blog_manager.write_post(new_filename, new_full_content):
+                yield "[ERROR] 重命名失败：无法写入新文件"
+                return
+            if not await self.blog_manager.delete_post(old_filename):
+                # 回滚：删除新写入的文件
+                try:
+                    await self.blog_manager.delete_post(new_filename)
+                except Exception:
+                    pass
+                yield "[ERROR] 重命名失败：无法删除旧文件，已回滚"
+                return
+            yield f"[OK] 文章已重命名为《{new_title}》\n提示：需要重新构建部署才能生效"
             return
 
         # 仅更新内容/元数据
@@ -871,12 +930,32 @@ class FireflyBlogManager(WebUIMixin, Star):
             metadata.slug = slug
         if pinned is not None:
             metadata.pinned = pinned
+        if draft is not None:
+            metadata.draft = draft
         if image:
             metadata.image = image
         if author:
             metadata.author = author
         if comment is not None:
             metadata.comment = comment
+
+        backup_dir = self._get_backup_dir()
+        os.makedirs(backup_dir, exist_ok=True)
+        backup_path = os.path.join(backup_dir, f"{old_filename}.{datetime.now().strftime('%Y%m%d%H%M%S')}.bak")
+        try:
+            with open(backup_path, 'w', encoding='utf-8') as f:
+                f.write(old_content)
+            backups = sorted(
+                [f for f in os.listdir(backup_dir) if f.startswith(old_filename) and f.endswith('.bak')],
+                reverse=True,
+            )
+            for old_bak in backups[5:]:
+                try:
+                    os.remove(os.path.join(backup_dir, old_bak))
+                except OSError:
+                    pass
+        except Exception as e:
+            logger.warning(f"[Firefly] 备份文章 {old_filename} 失败: {e}")
 
         metadata.updated = datetime.now().strftime("%Y-%m-%d")
         full_content = metadata.to_yaml() + "\n" + body
@@ -889,10 +968,10 @@ class FireflyBlogManager(WebUIMixin, Star):
     @filter.llm_tool(name="search_blog_posts")
     @require_blog_manager
     async def search_posts(self, event, keyword: str):
-        '''在 Firefly 博客中搜索文章。
+        '''在 Firefly 博客中搜索文章。支持精确匹配和正则表达式。
 
         Args:
-            keyword(string): 搜索关键词
+            keyword(string): 搜索关键词（支持正则表达式）
         '''
         results = await self._search_posts(keyword)
 
@@ -901,17 +980,76 @@ class FireflyBlogManager(WebUIMixin, Star):
         else:
             yield self._format_post_list(results)
 
+    @filter.llm_tool(name="list_blog_categories")
+    @require_blog_manager
+    async def list_categories(self, event):
+        '''列出 Firefly 博客中所有文章使用过的分类。'''
+        posts = await self.blog_manager.list_posts()
+        categories = {}
+        for post in posts:
+            if post.category:
+                categories[post.category] = categories.get(post.category, 0) + 1
+        if not categories:
+            yield "[INFO] 博客中没有分类"
+        else:
+            items = sorted(categories.items(), key=lambda x: -x[1])
+            lines = [f"{cat}（{count} 篇）" for cat, count in items]
+            yield "博客分类：\n" + "\n".join(lines)
+
+    @filter.llm_tool(name="list_blog_tags")
+    @require_blog_manager
+    async def list_tags(self, event):
+        '''列出 Firefly 博客中所有文章使用过的标签。'''
+        posts = await self.blog_manager.list_posts()
+        tags = {}
+        for post in posts:
+            for tag in post.tags:
+                tags[tag] = tags.get(tag, 0) + 1
+        if not tags:
+            yield "[INFO] 博客中没有标签"
+        else:
+            items = sorted(tags.items(), key=lambda x: -x[1])
+            lines = [f"{tag}（{count} 篇）" for tag, count in items]
+            yield "博客标签：\n" + "\n".join(lines)
+
     async def _search_posts(self, keyword: str) -> list[PostInfo]:
-        """按关键词搜索文章（标题/分类/标签），供 LLM 工具和显式命令共用"""
+        """按关键词搜索文章（标题/分类/标签/正文），支持精确匹配和模糊匹配"""
         posts = await self.blog_manager.list_posts()
         results = []
         keyword_lower = keyword.lower()
+
+        # 尝试作为正则编译，失败则退化为普通文本匹配
+        pattern = None
+        try:
+            pattern = re.compile(keyword, re.IGNORECASE)
+        except re.error:
+            pattern = None
 
         for post in posts:
             if (keyword_lower in post.title.lower()
                     or keyword_lower in post.category.lower()
                     or any(keyword_lower in t.lower() for t in post.tags)):
                 results.append(post)
+                continue
+            # 正则匹配：标题/分类/标签/正文
+            if pattern:
+                try:
+                    if (pattern.search(post.title)
+                            or pattern.search(post.category)
+                            or any(pattern.search(t) for t in post.tags)):
+                        results.append(post)
+                        continue
+                except Exception:
+                    pass
+            # 正文内容匹配
+            try:
+                content = await self.blog_manager.read_post(post.filename)
+                if content and keyword_lower in content.lower():
+                    results.append(post)
+                elif content and pattern and pattern.search(content):
+                    results.append(post)
+            except Exception:
+                pass
         return results
 
     # ========================================================================
@@ -1010,7 +1148,7 @@ class FireflyBlogManager(WebUIMixin, Star):
         if self.build_manager and self.build_manager.deploy_mode == DeployMode.REMOTE_BUILD:
             # 远程模式下，检查远端博客仓库的 dist（remote_blog_root）
             remote_blog_root = self.build_manager.remote_blog_root
-            rc, _, _ = await self.build_manager.remote_executor.run(f"test -d {remote_blog_root}/dist", timeout=5)
+            rc, _, _ = await self.build_manager.remote_executor.run(f"test -d {shlex.quote(remote_blog_root)}/dist", timeout=5)
             if rc != 0:
                 yield "[ERROR] 构建产物不存在，请先执行 build_blog"
                 return
@@ -1674,11 +1812,13 @@ class FireflyBlogManager(WebUIMixin, Star):
 
     @filter.command("博客投稿", alias=["提交投稿", "投稿文章"], priority=5)
     @require_blog_manager
-    async def cmd_submit_post(self, event, title: str = ""):
+    async def cmd_submit_post(self, event, title: str = "", tags: str = "", category: str = ""):
         """提交文章投稿。
 
         Args:
             title(string): 文章标题，正文内容通过后续消息或分号分隔提供
+            tags(string): 文章标签，多个用逗号分隔
+            category(string): 文章分类
 
         用法: /博客投稿 标题;正文内容
         或者: /博客投稿 标题
@@ -1736,15 +1876,20 @@ class FireflyBlogManager(WebUIMixin, Star):
             "submit_time": time.strftime("%Y-%m-%d %H:%M:%S"),
             "status": "pending",
             "reject_reason": "",
+            "tags": tags.strip(),
+            "category": category.strip(),
+            "description": "",
         }
         self._submissions_cache[submission_id] = sub
         self._save_submissions()
 
+        tag_info = f"\n   - 标签: {tags.strip()}" if tags.strip() else ""
+        cat_info = f"\n   - 分类: {category.strip()}" if category.strip() else ""
         yield event.plain_result(
             f"[OK] 投稿已提交！\n"
             f"   - 投稿 ID: `{submission_id}`\n"
             f"   - 标题: {title.strip()}\n"
-            f"   - 状态: 待审核\n"
+            f"   - 状态: 待审核\n{tag_info}{cat_info}"
             f"   - 使用 `/我的投稿` 查看您的投稿状态\n"
             f"   - 管理员将在审核后决定是否发布"
         )
